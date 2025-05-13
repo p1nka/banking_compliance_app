@@ -17,14 +17,19 @@ def save_to_db(df, table_name="accounts_data"):
         return False
 
     try:
-        required_db_cols = ["Account_ID", "Account_Type", "Last_Transaction_Date", "Account_Status",
-                            "Email_Contact_Attempt", "SMS_Contact_Attempt", "Phone_Call_Attempt", "KYC_Status",
-                            "Branch"]
-        cols_to_save = [col for col in required_db_cols if col in df.columns]
+        # Determine which columns from the DataFrame to save based on the table schema
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{table_name}'")
+        db_columns = [row[0] for row in cursor.fetchall()]
+
+        # Find matching columns between DataFrame and DB table
+        cols_to_save = [col for col in df.columns if col in db_columns]
+
         if not cols_to_save:
             st.sidebar.error(f"No matching columns found in DataFrame for table '{table_name}'. Cannot save.")
             return False
 
+        # Prepare DataFrame for saving
         df_to_save = df[cols_to_save].copy()
 
         # Convert datetime columns to string format compatible with SQL Server DATETIME2
@@ -35,15 +40,37 @@ def save_to_db(df, table_name="accounts_data"):
             df_to_save[col] = df_to_save[col].apply(
                 lambda x: x.strftime('%Y-%m-%d %H:%M:%S.%f') if isinstance(x, datetime) else None)
 
-        # Convert other relevant columns to string to handle potential mixed types gracefully during insertion
-        for col in ['Account_ID', 'Account_Type', 'Account_Status', 'Email_Contact_Attempt',
-                    'SMS_Contact_Attempt', 'Phone_Call_Attempt', 'KYC_Status', 'Branch']:
-            if col in df_to_save.columns:
-                df_to_save[col] = df_to_save[col].astype(str)
-                # Replace 'None' string resulting from NaT or actual None in conversion with 'Unknown' or empty string if appropriate
-                # Using 'Unknown' as per parsing logic, but consider if empty string is better for DB NVARCHAR
-                df_to_save[col] = df_to_save[col].replace('None', 'Unknown')
+        # Convert Yes/No columns to standardized format for SQL
+        boolean_like_columns = [
+            'FTD_Auto_Renewal', 'SDB_Tenant_Communication_Received',
+            'Bank_Contact_Attempted_Post_Dormancy_Trigger', 'Customer_Responded_to_Bank_Contact',
+            'Claim_Successful', 'Customer_Address_Known', 'Customer_Has_Active_Liability_Account',
+            'Customer_Has_Litigation_Regulatory_Reqs', 'Holder_Has_Activity_On_Any_Other_Account',
+            'Is_Asset_Only_Customer_Type', 'Expected_Account_Dormant',
+            'Expected_Requires_Article_3_Process', 'Expected_Transfer_to_CB_Due'
+        ]
 
+        for col in boolean_like_columns:
+            if col in df_to_save.columns:
+                # Ensure values are standardized as 'Yes'/'No'/'Unknown'
+                df_to_save[col] = df_to_save[col].astype(str)
+                df_to_save[col] = df_to_save[col].replace({
+                    'true': 'Yes', 'True': 'Yes', 'TRUE': 'Yes', 'yes': 'Yes', 'Yes': 'Yes', 'y': 'Yes', 'Y': 'Yes',
+                    'false': 'No', 'False': 'No', 'FALSE': 'No', 'no': 'No', 'No': 'No', 'n': 'No', 'N': 'No',
+                    'nan': 'Unknown', 'None': 'Unknown', 'none': 'Unknown', 'unknown': 'Unknown', 'Unknown': 'Unknown'
+                })
+
+        # For text columns, replace None/NaN with appropriate text
+        text_columns = [col for col in df_to_save.columns if col not in
+                        boolean_like_columns and
+                        not pd.api.types.is_numeric_dtype(df_to_save[col]) and
+                        not pd.api.types.is_datetime64_any_dtype(df_to_save[col])]
+
+        for col in text_columns:
+            if col in df_to_save.columns:
+                df_to_save[col] = df_to_save[col].fillna('Unknown')
+
+        # Truncate DB table and insert data
         with conn.cursor() as cursor:
             # Check if table exists before truncating
             cursor.execute(f"SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ?", (table_name,))
@@ -54,42 +81,33 @@ def save_to_db(df, table_name="accounts_data"):
                 return False
 
             cursor.execute(f"TRUNCATE TABLE {table_name}")
-            # conn.commit() # Commit truncate immediately
-
-            # Prepare for bulk insert or row-by-row insert
-            # Row-by-row is simpler but slower for large datasets. For demonstration, it's okay.
-            # For production, consider using `executemany` or a dedicated bulk insert library.
 
             # Build the INSERT statement template
             placeholders = ','.join(['?'] * len(cols_to_save))
-            columns_str = ','.join([f'[{c}]' for c in cols_to_save])  # Enclose column names in brackets for safety
+            columns_str = ','.join([f'[{c}]' for c in cols_to_save])  # Enclose column names in brackets
             insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({placeholders})"
 
             # Prepare values as tuples for executemany
-            # Handle potential None values for dates/nullable columns
             values_to_insert = []
             for index, row in df_to_save.iterrows():
-                # Convert pandas NaT to Python None explicitly for pyodbc
+                # Convert pandas NaN/NaT to Python None for pyodbc
                 prepared_values = []
                 for col in cols_to_save:
                     value = row[col]
-                    if pd.isna(value):  # Check for pandas missing values (NaT for dates, NaN for numeric)
+                    if pd.isna(value):  # Check for pandas missing values (NaT, NaN)
                         prepared_values.append(None)
                     else:
-                        prepared_values.append(value)  # Keep other types as is (they should be strings/formatted dates)
+                        prepared_values.append(value)
                 values_to_insert.append(tuple(prepared_values))
 
             if values_to_insert:
-                # Use executemany for better performance than row-by-row execute
+                # Use executemany for better performance
                 cursor.executemany(insert_sql, values_to_insert)
 
             conn.commit()
         return True
     except pyodbc.Error as e:
         st.sidebar.error(f"Database Save Error ('{table_name}'): {e}. Check data compatibility or constraints.")
-        return False
-    except KeyError as e:
-        st.sidebar.error(f"Missing expected column during save preparation: {e}")
         return False
     except Exception as e:
         st.sidebar.error(f"An unexpected error occurred during DB save ('{table_name}'): {e}")
@@ -112,9 +130,8 @@ def save_summary_to_db(observation, trend, insight, action):
                          """
             timestamp = datetime.now()
             # Ensure data types match DB schema NVARCHAR(MAX)
-            cursor.execute(insert_sql, (timestamp, str(observation)[:4000], str(trend)[:4000], str(insight)[:4000],
-                                        str(action)[
-                                        :4000]))  # Truncate to fit MAX size if needed, or ensure column is NVARCHAR(MAX)
+            cursor.execute(insert_sql, (timestamp, str(observation)[:8000], str(trend)[:8000], str(insight)[:8000],
+                                        str(action)[:8000]))  # Truncate to fit MAX size if needed
             conn.commit()
         return True
     except pyodbc.Error as e:

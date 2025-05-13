@@ -3,103 +3,160 @@ from datetime import datetime, timedelta
 
 
 def check_safe_deposit(df, threshold_date):
-    """Detects safe deposit accounts inactive over threshold with no contact attempts."""
+    """Detects safe deposit boxes with outstanding charges for CBUAE compliance."""
     try:
-        # Ensure columns exist and handle potential None/NaN in string comparisons
-        if not all(col in df.columns for col in
-                   ['Account_Type', 'Last_Transaction_Date', 'Email_Contact_Attempt', 'SMS_Contact_Attempt',
-                    'Phone_Call_Attempt']):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Safe Deposit check)"
+        # Check for necessary columns per CBUAE regulation
+        required_cols = ['Account_Type', 'SDB_Charges_Outstanding', 'Date_SDB_Charges_Became_Outstanding',
+                         'SDB_Tenant_Communication_Received']
 
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped: Missing columns: {', '.join(missing)})"
+
+        # Per Article 2(6) of CBUAE regulation: SDB is dormant if charges are outstanding for >3 years
+        # and no communication from tenant
         data = df[
             (df['Account_Type'].astype(str).str.contains("Safe Deposit", case=False, na=False)) &
-            (df['Last_Transaction_Date'].notna()) &  # Ensure date is not NaT
-            (df['Last_Transaction_Date'] < threshold_date) &
-            (df['Email_Contact_Attempt'].astype(str).str.lower() == 'no') &  # Handle NaNs by converting to str
-            (df['SMS_Contact_Attempt'].astype(str).str.lower() == 'no') &
-            (df['Phone_Call_Attempt'].astype(str).str.lower() == 'no')
+            (df['SDB_Charges_Outstanding'].notna()) &
+            (df['SDB_Charges_Outstanding'] > 0) &
+            (df['Date_SDB_Charges_Became_Outstanding'].notna()) &
+            (df['Date_SDB_Charges_Became_Outstanding'] < threshold_date) &
+            (df['SDB_Tenant_Communication_Received'].astype(str).str.lower() == 'no')
             ]
+
         count = len(data)
-        desc = f"Safe Deposit without contact attempts (>3y): {count} accounts"
+        desc = f"Safe Deposit Box with outstanding charges (>3y): {count} boxes"
         return data, count, desc
     except Exception as e:
         return pd.DataFrame(), 0, f"(Error in Safe Deposit check: {e})"
 
 
 def check_investment_inactivity(df, threshold_date):
-    """Detects investment accounts inactive over threshold with no contact attempts."""
+    """Detects investment accounts inactive over threshold with no contact attempts per CBUAE Article 2(3)."""
     try:
-        if not all(col in df.columns for col in
-                   ['Account_Type', 'Last_Transaction_Date', 'Email_Contact_Attempt', 'SMS_Contact_Attempt',
-                    'Phone_Call_Attempt']):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Investment check)"
+        # Check for necessary columns per CBUAE regulation
+        required_cols = ['Account_Type', 'Inv_Maturity_Redemption_Date',
+                         'Date_Last_Customer_Communication_Any_Type']
 
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped: Missing columns: {', '.join(missing)})"
+
+        # Per Article 2(3) of CBUAE regulation: Investment account is dormant if
+        # no contact for 3 years from maturity/redemption
         data = df[
             (df['Account_Type'].astype(str).str.contains("Investment", case=False, na=False)) &
-            (df['Last_Transaction_Date'].notna()) &
-            (df['Last_Transaction_Date'] < threshold_date) &
-            (df['Email_Contact_Attempt'].astype(str).str.lower() == 'no') &
-            (df['SMS_Contact_Attempt'].astype(str).str.lower() == 'no') &
-            (df['Phone_Call_Attempt'].astype(str).str.lower() == 'no')
+            (df['Inv_Maturity_Redemption_Date'].notna()) &
+            (df['Inv_Maturity_Redemption_Date'] < threshold_date) &
+            (
+                    (df['Date_Last_Customer_Communication_Any_Type'].isna()) |
+                    (df['Date_Last_Customer_Communication_Any_Type'] < df['Inv_Maturity_Redemption_Date'])
+            )
             ]
+
         count = len(data)
-        desc = f"Investment accounts without activity or contact (>3y): {count} accounts"
+        desc = f"Investment accounts with no contact since maturity/redemption (>3y): {count} accounts"
         return data, count, desc
     except Exception as e:
         return pd.DataFrame(), 0, f"(Error in Investment inactivity check: {e})"
 
 
 def check_fixed_deposit_inactivity(df, threshold_date):
-    """Detects fixed deposit accounts inactive over threshold."""
+    """Detects fixed deposit accounts inactive over threshold per CBUAE Article 2(2)."""
     try:
-        if not all(col in df.columns for col in ['Account_Type', 'Last_Transaction_Date']):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Fixed Deposit check)"
+        # Check for necessary columns per CBUAE regulation
+        required_cols = ['Account_Type', 'FTD_Maturity_Date', 'FTD_Auto_Renewal',
+                         'Date_Last_FTD_Renewal_Claim_Request']
 
-        data = df[
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped: Missing columns: {', '.join(missing)})"
+
+        # Per Article 2(2) of CBUAE regulation:
+        # Case 1: No auto-renewal, dormant if 3 years after maturity and no renewal/claim
+        # Case 2: Has auto-renewal, dormant if no communication for 3 years from first maturity
+
+        # Case 1
+        no_auto_renew = df[
             (df['Account_Type'].astype(str).str.lower() == 'fixed deposit') &
-            (df['Last_Transaction_Date'].notna()) &
-            (df['Last_Transaction_Date'] < threshold_date)
+            (df['FTD_Auto_Renewal'].astype(str).str.lower() == 'no') &
+            (df['FTD_Maturity_Date'].notna()) &
+            (df['FTD_Maturity_Date'] < threshold_date) &
+            (
+                    (df['Date_Last_FTD_Renewal_Claim_Request'].isna()) |
+                    (df['Date_Last_FTD_Renewal_Claim_Request'] < df['FTD_Maturity_Date'])
+            )
             ]
+
+        # Case 2
+        auto_renew = df[
+            (df['Account_Type'].astype(str).str.lower() == 'fixed deposit') &
+            (df['FTD_Auto_Renewal'].astype(str).str.lower() == 'yes') &
+            (df['FTD_Maturity_Date'].notna()) &
+            (df['FTD_Maturity_Date'] < threshold_date) &
+            (
+                    (df['Date_Last_Customer_Communication_Any_Type'].isna()) |
+                    (df['Date_Last_Customer_Communication_Any_Type'] < df['FTD_Maturity_Date'])
+            )
+            ]
+
+        # Combine the results
+        data = pd.concat([no_auto_renew, auto_renew]).drop_duplicates()
+
         count = len(data)
-        desc = f"Fixed deposit accounts with no activity (>3y): {count} accounts"
+        desc = f"Fixed deposit accounts meeting CBUAE dormancy criteria: {count} accounts"
         return data, count, desc
     except Exception as e:
         return pd.DataFrame(), 0, f"(Error in Fixed Deposit inactivity check: {e})"
 
 
 def check_general_inactivity(df, threshold_date):
-    """Detects Savings/Call/Current accounts inactive over threshold."""
+    """Detects Savings/Call/Current accounts inactive over threshold per CBUAE Article 2(1)."""
     try:
-        if not all(col in df.columns for col in ['Account_Type', 'Last_Transaction_Date']):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for General Inactivity check)"
+        # Check for necessary columns per CBUAE regulation
+        required_cols = ['Account_Type', 'Date_Last_Cust_Initiated_Activity']
 
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped: Missing columns: {', '.join(missing)})"
+
+        # Per Article 2(1) of CBUAE regulation: Account is dormant if no customer transaction for 3 years
         data = df[
-            (df['Account_Type'].astype(str).isin(["Savings", "Call", "Current"])) &
-            (df['Last_Transaction_Date'].notna()) &
-            (df['Last_Transaction_Date'] < threshold_date)
+            (df['Account_Type'].astype(str).str.lower().isin(["savings", "call", "current"])) &
+            (df['Date_Last_Cust_Initiated_Activity'].notna()) &
+            (df['Date_Last_Cust_Initiated_Activity'] < threshold_date)
             ]
+
         count = len(data)
-        desc = f"General accounts (Savings/Call/Current) with no activity (>3y): {count} accounts"
+        desc = f"General accounts (Savings/Call/Current) with no customer activity (>3y): {count} accounts"
         return data, count, desc
     except Exception as e:
         return pd.DataFrame(), 0, f"(Error in General inactivity check: {e})"
 
 
 def check_unreachable_dormant(df):
-    """Detects accounts marked dormant with no contact attempts."""
+    """Detects accounts marked dormant with no contact attempts per CBUAE Article 2(5)."""
     try:
-        if not all(col in df.columns for col in
-                   ['Account_Status', 'Email_Contact_Attempt', 'SMS_Contact_Attempt', 'Phone_Call_Attempt']):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Unreachable Dormant check)"
+        # Check for necessary columns per CBUAE regulation
+        required_cols = ['Expected_Account_Dormant', 'Customer_Address_Known',
+                         'Customer_Has_Active_Liability_Account']
 
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped: Missing columns: {', '.join(missing)})"
+
+        # Per Article 2(5) of CBUAE regulation: Account is dormant if:
+        # - Already marked as potentially dormant
+        # - Current address is unknown
+        # - Customer has no other active liability accounts
         data = df[
-            (df['Account_Status'].astype(str).str.lower() == 'dormant') &
-            (df['Email_Contact_Attempt'].astype(str).str.lower() == 'no') &
-            (df['SMS_Contact_Attempt'].astype(str).str.lower() == 'no') &
-            (df['Phone_Call_Attempt'].astype(str).str.lower() == 'no')
+            (df['Expected_Account_Dormant'].astype(str).str.lower() == 'yes') &
+            (df['Customer_Address_Known'].astype(str).str.lower() == 'no') &
+            (df['Customer_Has_Active_Liability_Account'].astype(str).str.lower() == 'no')
             ]
+
         count = len(data)
-        desc = f"Unreachable accounts already marked dormant: {count} accounts"
+        desc = f"Unreachable accounts marked potentially dormant: {count} accounts"
         return data, count, desc
     except Exception as e:
         return pd.DataFrame(), 0, f"(Error in Unreachable dormant check: {e})"

@@ -5,34 +5,45 @@ from database.connection import get_db_connection
 
 
 def detect_incomplete_contact(df):
-    """Detects accounts with at least one 'No' contact attempt."""
+    """Detects accounts that require contact attempts per CBUAE Article 3."""
     try:
-        if not all(col in df.columns for col in ['Email_Contact_Attempt', 'SMS_Contact_Attempt', 'Phone_Call_Attempt']):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Incomplete Contact check)"
+        # Check required columns for this check
+        required_cols = ['Bank_Contact_Attempted_Post_Dormancy_Trigger', 'Expected_Account_Dormant']
 
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped: Missing columns: {', '.join(missing)})"
+
+        # Find accounts marked as potentially dormant but no contact attempt made
         data = df[
-            (df['Email_Contact_Attempt'].astype(str).str.lower() == 'no') |
-            (df['SMS_Contact_Attempt'].astype(str).str.lower() == 'no') |
-            (df['Phone_Call_Attempt'].astype(str).str.lower() == 'no')
+            (df['Expected_Account_Dormant'].astype(str).str.lower() == 'yes') &
+            (df['Bank_Contact_Attempted_Post_Dormancy_Trigger'].astype(str).str.lower() == 'no')
             ]
+
         count = len(data)
-        desc = f"Accounts with incomplete contact attempts: {count} accounts"
+        desc = f"Accounts requiring contact attempts (CBUAE Article 3): {count} accounts"
         return data, count, desc
     except Exception as e:
         return pd.DataFrame(), 0, f"(Error in contact attempt verification: {e})"
 
 
 def detect_flag_candidates(df, threshold_date):
-    """Detects accounts inactive over threshold, not yet flagged dormant."""
+    """Detects accounts meeting dormancy criteria not yet flagged (CBUAE Article 2)."""
     try:
-        if not all(col in df.columns for col in ['Last_Transaction_Date', 'Account_Status']):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Flag Candidate check)"
+        # Check required columns
+        required_cols = ['Date_Last_Cust_Initiated_Activity', 'Expected_Account_Dormant']
 
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped: Missing columns: {', '.join(missing)})"
+
+        # Find accounts inactive before threshold but not yet flagged as dormant
         data = df[
-            (df['Last_Transaction_Date'].notna()) &
-            (df['Last_Transaction_Date'] < threshold_date) &
-            (df['Account_Status'].astype(str).str.lower() != 'dormant')
+            (df['Date_Last_Cust_Initiated_Activity'].notna()) &
+            (df['Date_Last_Cust_Initiated_Activity'] < threshold_date) &
+            (df['Expected_Account_Dormant'].astype(str).str.lower() != 'yes')
             ]
+
         count = len(data)
         desc = f"Accounts inactive over threshold, not yet flagged dormant: {count} accounts"
         return data, count, desc
@@ -41,17 +52,19 @@ def detect_flag_candidates(df, threshold_date):
 
 
 def detect_ledger_candidates(df):
-    """Detects accounts marked dormant requiring ledger classification (not already in ledger)."""
+    """Detects accounts requiring ledger classification (CBUAE Article 3)."""
     try:
-        if 'Account_Status' not in df.columns:
+        # Check required columns
+        if 'Expected_Account_Dormant' not in df.columns:
             return pd.DataFrame(), 0, "(Skipped: Required column missing for Ledger Candidate check)"
 
-        data = df[df['Account_Status'].astype(
-            str).str.lower() == 'dormant'].copy()  # Work on copy to avoid SettingWithCopyWarning
+        # Find accounts flagged as dormant that need ledger classification
+        data = df[df['Expected_Account_Dormant'].astype(str).str.lower() == 'yes'].copy()
 
+        # Check if these accounts are already in the dormant_ledger table
         ids_in_ledger = []
-        conn = get_db_connection()  # Uses cached connection
-        if conn:  # Only attempt DB check if connection is available
+        conn = get_db_connection()
+        if conn:
             try:
                 with conn:
                     cursor = conn.cursor()
@@ -59,51 +72,72 @@ def detect_ledger_candidates(df):
                     ids_in_ledger = [row[0] for row in cursor.fetchall()]
             except Exception as db_e:
                 st.warning(f"Could not check dormant ledger table: {db_e}. Proceeding without filtering.")
-                ids_in_ledger = []  # Ensure it's an empty list if check fails
+                ids_in_ledger = []
 
+        # Filter out accounts already in the ledger
         if ids_in_ledger:
             data = data[~data['Account_ID'].isin(ids_in_ledger)]
 
         count = len(data)
-        desc = f"Dormant accounts requiring ledger classification (not yet in ledger): {count} accounts"
+        desc = f"Dormant accounts requiring ledger classification: {count} accounts"
         return data, count, desc
     except Exception as e:
         return pd.DataFrame(), 0, f"(Error in ledger candidate detection: {e})"
 
 
 def detect_freeze_candidates(df, threshold_date):
-    """Detects dormant accounts inactive beyond freeze threshold."""
+    """Detects dormant accounts inactive beyond freeze threshold (CBUAE Article 3.5)."""
     try:
-        if not all(col in df.columns for col in ['Last_Transaction_Date', 'Account_Status']):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Freeze Candidate check)"
+        # Check required columns
+        required_cols = ['Date_Last_Cust_Initiated_Activity', 'Expected_Account_Dormant',
+                         'Expected_Requires_Article_3_Process']
 
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped: Missing columns: {', '.join(missing)})"
+
+        # Find dormant accounts that have been dormant for longer than threshold
+        # and require Article 3 process but haven't been processed
         data = df[
-            (df['Last_Transaction_Date'].notna()) &
-            (df['Last_Transaction_Date'] < threshold_date) &
-            (df['Account_Status'].astype(str).str.lower() == 'dormant')
+            (df['Date_Last_Cust_Initiated_Activity'].notna()) &
+            (df['Date_Last_Cust_Initiated_Activity'] < threshold_date) &
+            (df['Expected_Account_Dormant'].astype(str).str.lower() == 'yes') &
+            (df['Expected_Requires_Article_3_Process'].astype(str).str.lower() == 'yes')
             ]
+
         count = len(data)
-        desc = f"Dormant accounts inactive beyond freeze threshold: {count} accounts"
+        desc = f"Dormant accounts requiring Article 3 freeze process: {count} accounts"
         return data, count, desc
     except Exception as e:
         return pd.DataFrame(), 0, f"(Error in freeze candidate detection: {e})"
 
 
 def detect_transfer_candidates(df, cutoff_date):
-    """Detects dormant accounts inactive before a specific cutoff date (e.g., CBUAE)."""
+    """
+    Detects dormant accounts that should be transferred to Central Bank (CBUAE Article 8).
+    Accounts dormant for 5+ years
+    """
     if not isinstance(cutoff_date, datetime):
         return pd.DataFrame(), 0, "(Skipped: Valid cutoff date not provided for Transfer check)"
-    try:
-        if not all(col in df.columns for col in ['Last_Transaction_Date', 'Account_Status']):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Transfer Candidate check)"
 
+    try:
+        # Check required columns
+        required_cols = ['Date_Last_Cust_Initiated_Activity', 'Expected_Account_Dormant', 'Expected_Transfer_to_CB_Due']
+
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped: Missing columns: {', '.join(missing)})"
+
+        # Find accounts inactive before cutoff that should be transferred to CB
         data = df[
-            (df['Last_Transaction_Date'].notna()) &
-            (df['Last_Transaction_Date'] < cutoff_date) &
-            (df['Account_Status'].astype(str).str.lower() == 'dormant')
+            (df['Date_Last_Cust_Initiated_Activity'].notna()) &
+            (df['Date_Last_Cust_Initiated_Activity'] < cutoff_date) &
+            (df['Expected_Account_Dormant'].astype(str).str.lower() == 'yes') &
+            (df['Expected_Transfer_to_CB_Due'].astype(str).str.lower() != 'completed')
             ]
+
         count = len(data)
-        desc = f"Dormant accounts inactive before cutoff ({cutoff_date.strftime('%Y-%m-%d')}): {count} accounts"
+        desc = f"Dormant accounts due for transfer to Central Bank (5+ years): {count} accounts"
         return data, count, desc
     except Exception as e:
         return pd.DataFrame(), 0, f"(Error in transfer candidate detection: {e})"
@@ -155,7 +189,7 @@ def log_flag_instructions(account_ids, agent_name, threshold_days):
                         insert_sql,
                         (
                             str(acc_id),
-                            f"Identified by {agent_name} for review (Threshold: {threshold_days} days)",
+                            f"Identified by {agent_name} as dormant per CBUAE criteria (Threshold: {threshold_days} days)",
                             timestamp_now,
                             str(acc_id)
                         )

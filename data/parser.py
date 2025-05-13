@@ -4,6 +4,7 @@ from io import StringIO
 import traceback
 from config import SESSION_COLUMN_MAPPING
 
+
 @st.cache_data(show_spinner="Parsing data...")
 def parse_data(file_input):
     """Parses data, standardizes column names, converts types, and stores original names."""
@@ -52,90 +53,192 @@ def parse_data(file_input):
         df.columns = [f"col_{i}" if c == "" else c for i, c in enumerate(df.columns)]  # Handle empty names
         standardized_columns = list(df.columns)
 
+        # Map original column names to standardized names based on CBUAE regulation schema
+        column_mapping = create_cbuae_column_mapping(standardized_columns)
+
+        # Create a new DataFrame with properly mapped columns
+        new_df = pd.DataFrame()
+
+        # For each target CBUAE column, map from the standardized columns if available
+        for cbuae_col, std_cols in column_mapping.items():
+            mapped = False
+            for std_col in std_cols:
+                if std_col in df.columns:
+                    new_df[cbuae_col] = df[std_col]
+                    mapped = True
+                    break
+
+            # If no mapping found, add empty column with appropriate data type
+            if not mapped:
+                if cbuae_col.startswith('Date_'):
+                    new_df[cbuae_col] = pd.NaT
+                elif any(suffix in cbuae_col for suffix in ['_Amount', '_Balance', '_Outstanding']):
+                    new_df[cbuae_col] = pd.NA
+                else:
+                    new_df[cbuae_col] = 'Unknown'
+
+        # Ensure all required CBUAE columns exist
+        required_cols = [
+            'Account_ID', 'Customer_ID', 'Account_Type', 'Currency', 'Account_Creation_Date',
+            'Current_Balance', 'Date_Last_Bank_Initiated_Activity', 'Date_Last_Customer_Communication_Any_Type',
+            'FTD_Maturity_Date', 'FTD_Auto_Renewal', 'Date_Last_FTD_Renewal_Claim_Request',
+            'Inv_Maturity_Redemption_Date', 'SDB_Charges_Outstanding', 'Date_SDB_Charges_Became_Outstanding',
+            'SDB_Tenant_Communication_Received', 'Unclaimed_Item_Trigger_Date', 'Unclaimed_Item_Amount',
+            'Date_Last_Cust_Initiated_Activity', 'Bank_Contact_Attempted_Post_Dormancy_Trigger',
+            'Date_Last_Bank_Contact_Attempt', 'Customer_Responded_to_Bank_Contact',
+            'Date_Claim_Received', 'Claim_Successful', 'Amount_Paid_on_Claim', 'Scenario_Notes',
+            'Customer_Address_Known', 'Customer_Has_Active_Liability_Account',
+            'Customer_Has_Litigation_Regulatory_Reqs', 'Holder_Has_Activity_On_Any_Other_Account',
+            'Is_Asset_Only_Customer_Type', 'Expected_Account_Dormant', 'Expected_Requires_Article_3_Process',
+            'Expected_Transfer_to_CB_Due'
+        ]
+
+        for col in required_cols:
+            if col not in new_df.columns:
+                if col.startswith('Date_'):
+                    new_df[col] = pd.NaT
+                elif any(suffix in col for suffix in ['_Amount', '_Balance', '_Outstanding']):
+                    new_df[col] = pd.NA
+                else:
+                    new_df[col] = 'Unknown'
+                st.sidebar.warning(f"Added missing required column '{col}' with default values.")
+
+        # Properly convert column data types
+        convert_column_types(new_df)
+
         # Store the mapping between standardized and original column names
         if SESSION_COLUMN_MAPPING not in st.session_state:
             st.session_state[SESSION_COLUMN_MAPPING] = {}
 
-        # Update the mapping with new columns
+        # Update the mapping with new columns - keep track of both original to standardized
+        # and standardized to CBUAE mappings
         for std, orig in zip(standardized_columns, original_columns):
-            st.session_state[SESSION_COLUMN_MAPPING][std] = orig
+            # Find which CBUAE column this standardized column maps to
+            for cbuae_col, std_cols in column_mapping.items():
+                if std in std_cols:
+                    st.session_state[SESSION_COLUMN_MAPPING][cbuae_col] = orig
+                    break
+            # If not mapped to any CBUAE column, store original name
+            if std not in [c for cols in column_mapping.values() for c in cols]:
+                st.session_state[SESSION_COLUMN_MAPPING][std] = orig
 
-        # Define expected columns and their types/handling
-        date_cols = ['Last_Transaction_Date']
-        string_cols_require_str = ["Account_ID", "Account_Type", "Account_Status", "Email_Contact_Attempt",
-                                   "SMS_Contact_Attempt", "Phone_Call_Attempt", "KYC_Status", "Branch"]
+        st.sidebar.success(f"✅ Data parsed and standardized successfully! Shape: {new_df.shape}")
+        return new_df
 
-        # Ensure expected columns exist, add if missing with default value 'Unknown' or NaT for date
-        for col in date_cols:
-            if col not in df.columns:
-                df[col] = pd.NaT
-                st.sidebar.warning(f"Missing expected column '{col}'. Added with missing values.")
-        for col in string_cols_require_str:
-            if col not in df.columns:
-                df[col] = 'Unknown'
-                st.sidebar.warning(f"Missing expected column '{col}'. Added with 'Unknown' values.")
-
-        # Type conversion and cleaning for expected columns
-        for col in date_cols:
-            if col in df.columns:  # Check again after potentially adding
-                # Show the unique values before conversion for debugging
-                if not df[col].empty:
-                    unique_vals = df[col].dropna().unique()
-                    if len(unique_vals) > 0:
-                        st.sidebar.info(f"Sample dates before conversion ({col}): {unique_vals[:3]}")
-
-                # Attempt robust date conversion with multiple formats
-                try:
-                    # First try standard conversion with error coercing
-                    df[col] = pd.to_datetime(df[col], errors='coerce')
-
-                    # Check if we got too many NaT values (>50%)
-                    if df[col].isna().mean() > 0.5:
-                        st.sidebar.warning(
-                            f"Over 50% of dates in '{col}' couldn't be parsed. Trying alternative formats...")
-
-                        # Save a copy of the original column
-                        orig_dates = df[col].copy()
-
-                        # Try common date formats explicitly
-                        formats = ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d',
-                                   '%d-%m-%Y', '%m-%d-%Y', '%Y.%m.%d', '%d.%m.%Y']
-
-                        for fmt in formats:
-                            try:
-                                df[col] = pd.to_datetime(orig_dates, format=fmt, errors='coerce')
-                                # If this format worked well (less than 25% NaT), use it
-                                if df[col].isna().mean() < 0.25:
-                                    st.sidebar.info(f"Successfully parsed dates using format: {fmt}")
-                                    break
-                            except:
-                                continue
-                except Exception as e:
-                    st.sidebar.error(f"Error converting dates in column '{col}': {e}")
-                    # Ensure column exists even if conversion failed
-                    df[col] = pd.NaT
-
-        for col in string_cols_require_str:
-            if col in df.columns:  # Check again after potentially adding
-                # Ensure string type and fill NaNs, strip whitespace
-                try:
-                    df[col] = df[col].astype(str).fillna('Unknown').str.strip()
-                    # Replace common 'no data' indicators with 'Unknown'
-                    df[col] = df[col].replace(['nan', 'None', '', 'Null', 'NULL', 'null'], 'Unknown', regex=True)
-                except Exception as e:
-                    st.sidebar.error(f"Error standardizing column '{col}': {e}")
-                    # Ensure column exists with default value
-                    df[col] = 'Unknown'
-
-        # Final validation check
-        if df is None or df.empty:
-            st.sidebar.error("Data processing resulted in empty DataFrame. Check input data.")
-            return None
-
-        st.sidebar.success(f"✅ Data parsed and standardized successfully! Shape: {df.shape}")
-        return df
     except Exception as e:
         st.sidebar.error(f"Error during data parsing/standardization: {e}")
         st.sidebar.error(f"Original columns detected: {original_columns if original_columns else 'N/A'}")
         st.sidebar.error(f"Traceback: {traceback.format_exc()}")
         return None
+
+
+def create_cbuae_column_mapping(standardized_columns):
+    """
+    Create mapping between standardized column names and CBUAE schema column names.
+    This mapping helps identify which standardized columns correspond to which CBUAE columns.
+    """
+    # Define mapping with potential matches for each CBUAE column
+    # For each CBUAE column, list possible standardized column names
+    # (ordered by preference)
+    return {
+        'Account_ID': ['Account_ID', 'AccountID', 'Account_Number', 'AccountNumber', 'AcctID', 'ID'],
+        'Customer_ID': ['Customer_ID', 'CustomerID', 'Client_ID', 'ClientID', 'CustID'],
+        'Account_Type': ['Account_Type', 'AccountType', 'Type', 'Product', 'Account_Category'],
+        'Currency': ['Currency', 'Ccy', 'AccountCurrency', 'CurrencyCode'],
+        'Account_Creation_Date': ['Account_Creation_Date', 'CreationDate', 'OpenDate', 'Open_Date', 'Created_Date'],
+        'Current_Balance': ['Current_Balance', 'Balance', 'AccountBalance', 'BalanceAmount'],
+        'Date_Last_Bank_Initiated_Activity': ['Date_Last_Bank_Initiated_Activity', 'Last_Bank_Activity',
+                                              'BankActivityDate'],
+        'Date_Last_Customer_Communication_Any_Type': ['Date_Last_Customer_Communication', 'LastCommunication',
+                                                      'Last_Contact_Date'],
+        'FTD_Maturity_Date': ['FTD_Maturity_Date', 'MaturityDate', 'FixedDepositMaturity', 'Maturity'],
+        'FTD_Auto_Renewal': ['FTD_Auto_Renewal', 'AutoRenewal', 'Auto_Renew', 'Is_Auto_Renewal'],
+        'Date_Last_FTD_Renewal_Claim_Request': ['Date_Last_FTD_Renewal', 'RenewalRequestDate', 'Last_Renewal_Date'],
+        'Inv_Maturity_Redemption_Date': ['Inv_Maturity_Date', 'InvestmentMaturity', 'RedemptionDate'],
+        'SDB_Charges_Outstanding': ['SDB_Charges', 'SafeDepositCharges', 'OutstandingCharges'],
+        'Date_SDB_Charges_Became_Outstanding': ['SDB_Charges_Date', 'ChargesOutstandingDate'],
+        'SDB_Tenant_Communication_Received': ['SDB_Tenant_Communication', 'TenantResponse', 'Has_Tenant_Responded'],
+        'Unclaimed_Item_Trigger_Date': ['Unclaimed_Trigger_Date', 'UnclaimedDate', 'ItemTriggerDate'],
+        'Unclaimed_Item_Amount': ['Unclaimed_Amount', 'UnclaimedValue', 'ItemAmount'],
+        'Date_Last_Cust_Initiated_Activity': ['Last_Transaction_Date', 'Date_Last_Transaction', 'LastActivityDate',
+                                              'LastTxnDate'],
+        'Bank_Contact_Attempted_Post_Dormancy_Trigger': ['Contact_Attempted', 'BankContactAttempt', 'ContactTried'],
+        'Date_Last_Bank_Contact_Attempt': ['Last_Contact_Attempt', 'ContactAttemptDate', 'AttemptDate'],
+        'Customer_Responded_to_Bank_Contact': ['Customer_Responded', 'ResponseReceived', 'Has_Responded'],
+        'Date_Claim_Received': ['Claim_Date', 'ClaimReceived', 'DateClaimed'],
+        'Claim_Successful': ['Claim_Success', 'Is_Claim_Successful', 'ClaimResult'],
+        'Amount_Paid_on_Claim': ['Claim_Amount', 'AmountPaid', 'PaymentAmount'],
+        'Scenario_Notes': ['Notes', 'Comments', 'Scenario', 'Description'],
+        'Customer_Address_Known': ['Address_Known', 'Has_Address', 'KnownAddress'],
+        'Customer_Has_Active_Liability_Account': ['Has_Active_Account', 'Active_Liability', 'HasLiabilityAccount'],
+        'Customer_Has_Litigation_Regulatory_Reqs': ['Has_Litigation', 'RegulatoryRequirements', 'HasLegalRestriction'],
+        'Holder_Has_Activity_On_Any_Other_Account': ['Has_Other_Activity', 'Activity_Other_Account',
+                                                     'OtherAccountActivity'],
+        'Is_Asset_Only_Customer_Type': ['Is_Asset_Only', 'Asset_Only_Customer', 'AssetOnlyType'],
+        'Expected_Account_Dormant': ['Account_Status', 'Is_Dormant', 'Dormant', 'StatusDormant'],
+        'Expected_Requires_Article_3_Process': ['Requires_Art3', 'Article_3_Required', 'Art3Process'],
+        'Expected_Transfer_to_CB_Due': ['Transfer_To_CB', 'CBTransfer', 'CentralBankTransfer']
+    }
+
+
+def convert_column_types(df):
+    """Convert DataFrame columns to appropriate types based on CBUAE schema."""
+    # Convert date columns
+    date_columns = [col for col in df.columns if col.startswith('Date_')]
+    for col in date_columns:
+        if col in df.columns:
+            try:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+            except Exception as e:
+                st.sidebar.warning(f"Could not convert {col} to datetime: {e}")
+
+    # Convert numeric columns (amounts and balances)
+    numeric_columns = [col for col in df.columns if
+                       any(suffix in col for suffix in ['_Amount', '_Balance', '_Outstanding'])]
+    for col in numeric_columns:
+        if col in df.columns:
+            try:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            except Exception as e:
+                st.sidebar.warning(f"Could not convert {col} to numeric: {e}")
+
+    # Convert Yes/No columns to standardized format
+    boolean_columns = [
+        'FTD_Auto_Renewal', 'SDB_Tenant_Communication_Received',
+        'Bank_Contact_Attempted_Post_Dormancy_Trigger', 'Customer_Responded_to_Bank_Contact',
+        'Claim_Successful', 'Customer_Address_Known', 'Customer_Has_Active_Liability_Account',
+        'Customer_Has_Litigation_Regulatory_Reqs', 'Holder_Has_Activity_On_Any_Other_Account',
+        'Is_Asset_Only_Customer_Type', 'Expected_Account_Dormant',
+        'Expected_Requires_Article_3_Process', 'Expected_Transfer_to_CB_Due'
+    ]
+
+    for col in boolean_columns:
+        if col in df.columns:
+            try:
+                # Convert various boolean representations to 'Yes'/'No'
+                df[col] = df[col].astype(str).str.lower()
+                df[col] = df[col].replace({
+                    'true': 'Yes', 'yes': 'Yes', 'y': 'Yes', '1': 'Yes', 't': 'Yes',
+                    'false': 'No', 'no': 'No', 'n': 'No', '0': 'No', 'f': 'No',
+                    'nan': 'Unknown', 'none': 'Unknown', '': 'Unknown',
+                    'na': 'Unknown', 'null': 'Unknown', 'unknown': 'Unknown'
+                })
+            except Exception as e:
+                st.sidebar.warning(f"Could not standardize {col} values: {e}")
+
+    # Ensure Account_Type values are standardized
+    if 'Account_Type' in df.columns:
+        try:
+            df['Account_Type'] = df['Account_Type'].astype(str).str.lower()
+            # Map various account type terminology to standard values
+            df['Account_Type'] = df['Account_Type'].replace({
+                'current': 'Current', 'currentaccount': 'Current', 'current_account': 'Current',
+                'saving': 'Savings', 'savings': 'Savings', 'savingsaccount': 'Savings', 'savings_account': 'Savings',
+                'fd': 'Fixed Deposit', 'fixed': 'Fixed Deposit', 'fixeddeposit': 'Fixed Deposit',
+                'term': 'Fixed Deposit',
+                'call': 'Call', 'callaccount': 'Call', 'call_account': 'Call',
+                'inv': 'Investment', 'invest': 'Investment', 'investaccount': 'Investment',
+                'sdb': 'Safe Deposit', 'safe': 'Safe Deposit', 'safebox': 'Safe Deposit'
+            })
+        except Exception as e:
+            st.sidebar.warning(f"Could not standardize Account_Type values: {e}")

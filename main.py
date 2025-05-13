@@ -18,7 +18,7 @@ def main():
     """Main application entry point."""
     # Configure Streamlit page settings
     st.set_page_config(
-        page_title="Unified Banking Compliance Solution",
+        page_title="CBUAE Dormant Accounts Compliance Solution",
         layout="wide"
     )
 
@@ -58,7 +58,17 @@ def main():
         current_df = st.session_state[SESSION_APP_DF].copy()
 
     # Display app title
-    st.title(f"{app_mode}" if app_mode else "Unified Banking Compliance Solution")
+    st.title(f"{app_mode}" if app_mode else "CBUAE Dormant Accounts Compliance Solution")
+
+    # Add subtitle explaining CBUAE regulation focus
+    if not app_mode:
+        st.markdown("""
+        ### Central Bank of UAE - Dormant Accounts Regulation
+
+        This application helps financial institutions comply with Central Bank of UAE regulations 
+        on dormant accounts management. It implements detection mechanisms, audit trails, and 
+        reporting tools for accounts meeting the dormancy criteria defined in CBUAE regulations.
+        """)
 
     # Display processed data overview
     if current_df is not None:
@@ -116,32 +126,41 @@ def display_getting_started_info(db_initialized):
     st.info("👆 Please upload or load data using the sidebar options and click 'Process' to begin analysis.")
     st.header("Getting Started")
     st.markdown("""
-    Welcome to the Unified Banking Compliance Solution.
-    This application helps you analyze banking account data for compliance purposes, particularly focusing on dormant accounts.
+    Welcome to the CBUAE Dormant Accounts Compliance Solution.
+
+    This application helps financial institutions comply with the Central Bank of the UAE's regulations 
+    regarding dormant accounts (Regulation dated January 15, 2020).
 
     **Steps:**
     1.  **Upload Data:** Use the sidebar to upload your account data via CSV, XLSX, JSON, or fetch directly from a URL or an Azure SQL Database table.
-    2.  **Process Data:** Click the "Process Uploaded/Fetched Data" button. The app will standardize column names and attempt to save the data to the configured default Azure SQL Database.
+    2.  **Process Data:** Click the "Process Uploaded/Fetched Data" button. The app will map your data to the CBUAE-compliant schema and save it to the Azure SQL Database.
     3.  **Select Mode:** Once data is processed, choose an analysis mode from the sidebar:
-        *   **Dormant Account Analyzer:** Run pre-defined agents to identify different categories of potentially dormant or high-risk accounts.
-        *   **Compliance Analyzer:** Run compliance checks (e.g., contact verification, flagging candidates, ledger review, freeze/transfer candidates).
-        *   **SQL Bot:** Query the **default** database (where processed data is saved) using natural language (requires AI Assistant).
-        *   **Chatbot Only:** Ask questions or request simple visualizations about the **loaded dataset** using natural language (requires AI Assistant).
+        *   **Dormant Account Analyzer:** Run pre-defined agents to identify different categories of potentially dormant accounts according to CBUAE Article 2 criteria.
+        *   **Compliance Analyzer:** Run compliance checks for CBUAE Article 3, including contact verification, flagging candidates, ledger review, and Central Bank transfer requirements.
+        *   **SQL Bot:** Query the database using natural language (requires AI Assistant).
+        *   **Chatbot Only:** Ask questions or request visualizations about the loaded dataset (requires AI Assistant).
+
+    **Key CBUAE Regulation Features Implemented:**
+    - Detection of dormant accounts based on 5 specific criteria (Article 2)
+    - Contact attempt tracking and verification (Article 3)
+    - Dormant ledger classification (Article 3)
+    - Bank freeze candidate identification (Article 3.5)
+    - Central Bank transfer requirements (Article 8)
 
     **Configuration:**
-    *   Database connection and AI features require credentials stored in `.streamlit/secrets.toml` or set as environment variables (`DB_USERNAME`, `DB_PASSWORD`, `GROQ_API_KEY`, etc.).
-    *   The default Azure SQL server and database constants can be overridden via environment variables.
-    *   Ensure your Azure SQL server firewall allows connections from the IP address where you are running this application.
+    *   Database connection requires credentials in `.streamlit/secrets.toml` or as environment variables.
+    *   AI features require a Groq API key configured in secrets or environment variables.
+    *   Azure SQL Server firewall must allow connections from the IP address where you're running this application.
     """)
 
     # Database status
     if db_initialized:
-        st.success("✅ Default database connected and initialized successfully.")
+        st.success("✅ Azure SQL database connected and initialized successfully.")
     else:
-        st.warning("⚠️ Default database connection/initialization failed. Check your database configuration.")
+        st.warning("⚠️ Azure SQL database connection/initialization failed. Check your database configuration.")
 
     st.markdown("---")
-    st.markdown("Developed as a demonstration of AI-powered compliance tools.")
+    st.markdown("Developed as a CBUAE compliance tool demonstration.")
 
 
 if __name__ == "__main__":
