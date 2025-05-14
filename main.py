@@ -1,148 +1,238 @@
 import streamlit as st
+import pandas as pd
+from datetime import datetime
+import os
+import hashlib
+import hmac
 
-# Import configuration and core modules
-from config import init_session_state, SESSION_APP_DF, SESSION_DATA_PROCESSED
-from auth import enforce_login
-from database.schema import init_db
-from ai.llm import load_llm
-
-# Import UI components
-from ui.sidebar import render_sidebar
-from ui.dormant_ui import render_dormant_analyzer
-from ui.compliance_ui import render_compliance_analyzer
-from ui.sqlbot_ui import render_sqlbot
-from ui.chatbot_ui import render_chatbot
+# ⚠️ IMPORTANT: Set page config FIRST, before any other imports or operations ⚠️
+st.set_page_config(
+    page_title="Banking Compliance Analysis Tool",
+    page_icon="🏦",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 
-def main():
-    """Main application entry point."""
-    # Configure Streamlit page settings
-    st.set_page_config(
-        page_title="Unified Banking Compliance Solution",
-        layout="wide"
+# Authentication functions
+def check_password():
+    """Returns `True` if the user had the correct password."""
+
+    def validate_credentials(username, password):
+        # In a production app, you would check against a secure database
+        # This is a simple example with hardcoded credentials - replace with secure implementation
+        # The passwords should be stored as salted hashes in a database
+        credentials = {
+            "admin": generate_hash("admin_password"),
+            "analyst": generate_hash("analyst_password"),
+            "auditor": generate_hash("auditor_password")
+        }
+
+        # Check if username exists and password matches
+        if username in credentials:
+            stored_hash = credentials[username]
+            return hmac.compare_digest(stored_hash, generate_hash(password))
+        return False
+
+    def generate_hash(password):
+        # This is a simple hashing function - in production use a proper password hashing library
+        return hashlib.sha256(password.encode()).hexdigest()
+
+    # Initialize session state for login
+    if "authentication_status" not in st.session_state:
+        st.session_state["authentication_status"] = False
+    if "username" not in st.session_state:
+        st.session_state["username"] = ""
+    if "logout" not in st.session_state:
+        st.session_state["logout"] = False
+
+    # If the user is already authenticated, show the logout button
+    if st.session_state["authentication_status"]:
+        col1, col2 = st.columns([9, 1])
+        with col2:
+            if st.button("Logout"):
+                st.session_state["authentication_status"] = False
+                st.session_state["username"] = ""
+                st.session_state["logout"] = True
+                # Clear application data on logout for security
+                if "db_connection" in st.session_state:
+                    try:
+                        st.session_state["db_connection"].close()
+                    except:
+                        pass
+                    del st.session_state["db_connection"]
+
+                if "SESSION_APP_DF" in st.session_state:
+                    del st.session_state["SESSION_APP_DF"]
+                if "SESSION_DATA_PROCESSED" in st.session_state:
+                    del st.session_state["SESSION_DATA_PROCESSED"]
+
+                st.rerun()  # Changed from st.experimental_rerun()
+        return True
+
+    # If the user is not authenticated, show the login form
+    if st.session_state["logout"]:
+        st.info("You have been logged out.")
+        st.session_state["logout"] = False
+
+    # Create a clean login form
+    st.markdown("<h1 style='text-align: center;'>Banking Compliance Analysis Tool</h1>", unsafe_allow_html=True)
+    st.markdown("<h3 style='text-align: center;'>Login</h3>", unsafe_allow_html=True)
+
+    # Use columns to center the login form
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col2:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submit_button = st.form_submit_button("Login")
+
+            if submit_button:
+                if validate_credentials(username, password):
+                    st.session_state["authentication_status"] = True
+                    st.session_state["username"] = username
+                    st.rerun()  # Changed from st.experimental_rerun()
+                else:
+                    st.error("Invalid username or password")
+                    return False
+
+    # Display additional information
+    with col2:
+        st.markdown("---")
+        st.markdown("#### Demo Credentials")
+        st.markdown("""
+        - Username: `admin`, Password: `admin_password`
+        - Username: `analyst`, Password: `analyst_password`
+        - Username: `auditor`, Password: `auditor_password`
+        """)
+        st.markdown("---")
+        st.markdown("*Note: In a production environment, credentials should be stored securely.*")
+
+    return False
+
+
+# Only import other modules after handling login
+if check_password():
+    # Only after setting page config and authentication, import other modules
+    from config import (
+        APP_TITLE, APP_SUBTITLE, SESSION_APP_DF,
+        SESSION_DATA_PROCESSED, SESSION_COLUMN_MAPPING
     )
 
-    # Initialize session state
-    init_session_state()
+    # Import database initialization functions
+    from database.schema import init_db, get_db_schema
 
-    # Enforce login
-    if not enforce_login():
-        return
+    # Now import UI modules
+    from ui.sidebar import render_sidebar
+    from ui.dormant_ui import render_dormant_analyzer
+    from ui.compliance_ui import render_compliance_analyzer
+    from ui.sqlbot_ui import render_sqlbot
+    from ui.chatbot_ui import render_chatbot
 
-    # Load the LLM for AI features - handle gracefully if it fails
+    # Import AI model
+    from ai.llm import get_llm
+
+    # Display user information
+    st.sidebar.markdown(f"**Logged in as:** {st.session_state['username']}")
+    st.sidebar.markdown("---")
+
+    # App title
+    st.title(APP_TITLE)
+    st.markdown(APP_SUBTITLE)
+
+    # Try to get the LLM model
+    llm = None
     try:
-        llm = load_llm()
+        llm = get_llm()
         if llm is None:
-            st.sidebar.warning("AI features are limited. The application will run in basic mode.")
+            st.sidebar.warning("⚠️ AI Assistant not available. Some features will be limited.")
     except Exception as e:
-        st.sidebar.error(f"Error loading AI model: {e}")
-        st.sidebar.warning("AI features are disabled. The application will run in basic mode.")
-        llm = None
+        st.sidebar.error(f"Error initializing LLM: {e}")
+        st.sidebar.warning("⚠️ AI Assistant not available. Some features will be limited.")
 
-    # Initialize database schema
+    # Try to initialize the database
     try:
-        db_initialized = init_db()
-    except Exception as db_error:
-        st.sidebar.error(f"Database initialization error: {db_error}")
-        db_initialized = False
+        init_db()
+    except Exception as e:
+        st.sidebar.error(f"Database initialization error: {str(e)}")
+        st.sidebar.info("Continuing with limited database functionality.")
 
-    # Render sidebar (handles data upload and processing)
+    # Render the sidebar with upload options
     render_sidebar()
 
-    # Determine which app mode to display
-    app_mode = st.session_state.get("app_mode", None)
-
-    # Get the current DataFrame if data is processed
-    current_df = None
-    if st.session_state.get(SESSION_DATA_PROCESSED, False) and st.session_state.get(SESSION_APP_DF) is not None:
-        current_df = st.session_state[SESSION_APP_DF].copy()
-
-    # Display app title
-    st.title(f"{app_mode}" if app_mode else "Unified Banking Compliance Solution")
-
-    # Display processed data overview
-    if current_df is not None:
-        st.header("Data Overview")
-        if st.checkbox("View Processed Dataset (first 5 rows)", key="view_processed_data_checkbox"):
-            from config import SESSION_COLUMN_MAPPING
-            display_df = current_df.head().copy()
-
-            # Display with original column names if available
-            if SESSION_COLUMN_MAPPING in st.session_state and st.session_state[SESSION_COLUMN_MAPPING]:
-                try:
-                    # Create a display mapping that only includes columns present in the current small dataframe
-                    display_columns_mapping = {
-                        std_col: st.session_state[SESSION_COLUMN_MAPPING].get(std_col, std_col)
-                        for std_col in display_df.columns
-                    }
-                    display_df.rename(columns=display_columns_mapping, inplace=True)
-                    st.dataframe(display_df)
-                    st.caption("Displaying original column names where available for the first 5 rows.")
-                except Exception as e:
-                    st.error(f"Error applying original column names for display: {e}")
-                    st.dataframe(current_df.head())
-                    st.caption("Displaying standardized column names for the first 5 rows.")
-            else:
-                st.dataframe(display_df)
-                st.caption("Displaying standardized column names for the first 5 rows.")
-        st.divider()
-
-    # Render the appropriate app mode interface
-    if current_df is not None and app_mode:
+    # AGENT COMPATIBILITY FIX: Check if we have data in db_loaded_data but not in SESSION_APP_DF
+    # This helps ensure compatibility between SQL data loading and the analyzers
+    if "db_loaded_data" in st.session_state and st.session_state.get(SESSION_DATA_PROCESSED, False) == False:
         try:
-            if app_mode == "🏦 Dormant Account Analyzer":
-                render_dormant_analyzer(current_df, llm)
+            from data.parser import parse_data
 
-            elif app_mode == "🔒 Compliance Analyzer":
-                render_compliance_analyzer(current_df, llm)
+            # We have SQL data that hasn't been processed for the analyzers
+            st.info("Preparing SQL data for analyzers...")
 
-            elif app_mode == "🔍 SQL Bot":
-                render_sqlbot(llm)
+            # Use the existing parse_data function to prepare the data for the analyzers
+            df_parsed = parse_data(st.session_state["db_loaded_data"])
+            st.session_state[SESSION_APP_DF] = df_parsed
+            st.session_state[SESSION_DATA_PROCESSED] = True
 
-            elif app_mode == "💬 Chatbot Only":
-                render_chatbot(current_df, llm)
-        except Exception as ui_error:
-            st.error(f"Error in UI rendering: {ui_error}")
-            import traceback
-            st.error(f"Error details: {traceback.format_exc()}")
-            st.warning("Try selecting a different mode or refreshing the page.")
+            # Show success message
+            st.success("SQL data is now available to analyzers. Please select an analysis mode.")
+        except Exception as e:
+            st.error(f"Error preparing SQL data for analyzers: {e}")
 
-    else:  # No data processed
-        display_getting_started_info(db_initialized)
+    # Main page content based on selected mode
+    if st.session_state.get(SESSION_DATA_PROCESSED, False):
+        # Get the data and current mode
+        df = st.session_state.get(SESSION_APP_DF)
+        app_mode = st.session_state.get("app_mode", "🏦 Dormant Account Analyzer")
 
-
-def display_getting_started_info(db_initialized):
-    """Display getting started information for new users."""
-    st.info("👆 Please upload or load data using the sidebar options and click 'Process' to begin analysis.")
-    st.header("Getting Started")
-    st.markdown("""
-    Welcome to the Unified Banking Compliance Solution.
-    This application helps you analyze banking account data for compliance purposes, particularly focusing on dormant accounts.
-
-    **Steps:**
-    1.  **Upload Data:** Use the sidebar to upload your account data via CSV, XLSX, JSON, or fetch directly from a URL or an Azure SQL Database table.
-    2.  **Process Data:** Click the "Process Uploaded/Fetched Data" button. The app will standardize column names and attempt to save the data to the configured default Azure SQL Database.
-    3.  **Select Mode:** Once data is processed, choose an analysis mode from the sidebar:
-        *   **Dormant Account Analyzer:** Run pre-defined agents to identify different categories of potentially dormant or high-risk accounts.
-        *   **Compliance Analyzer:** Run compliance checks (e.g., contact verification, flagging candidates, ledger review, freeze/transfer candidates).
-        *   **SQL Bot:** Query the **default** database (where processed data is saved) using natural language (requires AI Assistant).
-        *   **Chatbot Only:** Ask questions or request simple visualizations about the **loaded dataset** using natural language (requires AI Assistant).
-
-    **Configuration:**
-    *   Database connection and AI features require credentials stored in `.streamlit/secrets.toml` or set as environment variables (`DB_USERNAME`, `DB_PASSWORD`, `GROQ_API_KEY`, etc.).
-    *   The default Azure SQL server and database constants can be overridden via environment variables.
-    *   Ensure your Azure SQL server firewall allows connections from the IP address where you are running this application.
-    """)
-
-    # Database status
-    if db_initialized:
-        st.success("✅ Default database connected and initialized successfully.")
+        # Display different UI based on selected mode
+        if app_mode == "🏦 Dormant Account Analyzer":
+            render_dormant_analyzer(df, llm)
+        elif app_mode == "🔒 Compliance Analyzer":
+            render_compliance_analyzer(df, llm)
+        elif app_mode == "🔍 SQL Bot":
+            render_sqlbot(llm)
+        elif app_mode == "💬 Chatbot Only":
+            render_chatbot(df, llm)
     else:
-        st.warning("⚠️ Default database connection/initialization failed. Check your database configuration.")
+        st.info(
+            "👈 Please upload data using the sidebar options to get started."
+        )
 
+        # If no data is loaded, show an example of the expected format
+        if st.checkbox("Show Expected Data Format"):
+            st.subheader("Example Data Format")
+            # Create a small example DataFrame
+            example_data = {
+                "Account_ID": ["ACC001", "ACC002", "ACC003"],
+                "Customer_ID": ["CUST001", "CUST002", "CUST003"],
+                "Account_Type": ["Savings", "Current", "Fixed Deposit"],
+                "Date_Last_Cust_Initiated_Activity": ["2023-01-15", "2022-05-20", "2021-02-10"],
+                "Expected_Account_Dormant": ["No", "Yes", "Yes"]
+            }
+            example_df = pd.DataFrame(example_data)
+            st.dataframe(example_df)
+
+            st.markdown("""
+            ### Essential Columns
+            Your dataset should include the following key columns:
+            - `Account_ID`: Unique identifier for the account
+            - `Customer_ID`: Customer identifier
+            - `Account_Type`: Type of account (Savings, Current, Fixed Deposit, etc.)
+            - `Date_Last_Cust_Initiated_Activity`: Date of the last customer-initiated activity
+            - `Expected_Account_Dormant`: Whether the account is expected to be dormant (Yes/No)
+
+            ### Additional Columns
+            For full functionality, include these recommended columns:
+            - Date columns: Account creation date, last communication date
+            - Status columns: Current balance, auto-renewal settings
+            - Flag columns: Customer address known, active liability accounts
+            """)
+
+    # Add a footer
     st.markdown("---")
-    st.markdown("Developed as a demonstration of AI-powered compliance tools.")
-
-
-if __name__ == "__main__":
-    main()
+    st.markdown(f"*Banking Compliance Analysis App • {datetime.now().year}*")
+else:
+    # If login fails, don't load the rest of the application
+    pass

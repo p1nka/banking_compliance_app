@@ -20,32 +20,47 @@ def render_sqlbot(llm):
     """
     st.header("SQL Database Query Bot")
 
-    # Explicitly state which database is being queried
-    st.info(
-        f"🤖 This bot queries the **default database**: `{DB_NAME}` on server `{DB_SERVER}` as configured via secrets/environment variables.")
-    st.caption("*(This is separate from the 'Load Data' feature, which brings data into the app's memory.)*")
+    # Check if there's an active database connection
+    if "db_connection" in st.session_state and st.session_state["db_connection"]:
+        conn = st.session_state["db_connection"]
+        is_direct_connection = True
+        selected_table = st.session_state.get("sql_table_schema", "Unknown table")
+        st.info(f"🔗 Connected directly to database. Loaded table: **{selected_table}**")
+    else:
+        # Fall back to default connection
+        conn = get_db_connection()
+        is_direct_connection = False
+        st.info(
+            f"🤖 This bot queries the **default database**: `{DB_NAME}` on server `{DB_SERVER}` as configured via secrets/environment variables.")
 
-    # Check prerequisites
-    conn = get_db_connection()
+    # Check if connection was successful
     if conn is None:
-        st.warning("Cannot use SQL Bot: Default database connection failed.")
+        st.warning("Cannot use SQL Bot: Database connection failed.")
         return
 
+    # Check if LLM is available
     if not llm:
         st.warning(
             "AI Assistant (Groq/Langchain) is not available. SQL Bot will run in basic mode with limited functionality.")
         # Provide a simple SQL editor as fallback
         st.subheader("Manual SQL Query")
+
+        # If directly connected, suggest the loaded table
+        default_query = f"SELECT TOP 10 * FROM {st.session_state.get('sql_table_schema', 'accounts_data')}" if is_direct_connection else "SELECT TOP 10 * FROM accounts_data"
+
         manual_sql = st.text_area(
             "Enter SQL query:",
-            value="SELECT TOP 10 * FROM accounts_data",
+            value=default_query,
             height=150
         )
 
         if st.button("Execute Query", key="execute_manual_sql"):
+            # Clean the SQL query to prevent syntax errors
+            clean_sql = clean_sql_query(manual_sql)
+
             try:
                 with st.spinner("Executing query..."):
-                    results_df = pd.read_sql(manual_sql, conn)
+                    results_df = pd.read_sql(clean_sql, conn)
 
                 st.subheader("Query Results")
                 if not results_df.empty:
@@ -69,8 +84,33 @@ def render_sqlbot(llm):
         show_query_history()
         return
 
-    # Fetch schema for the default database
-    schema = get_db_schema()
+    # Get database schema
+    if is_direct_connection:
+        # If using direct connection, create schema info from the current table
+        try:
+            # Get table structure
+            cursor = conn.cursor()
+            # Use SQL Server's method to get column info
+            cursor.execute(
+                f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{selected_table}'")
+            columns = cursor.fetchall()
+
+            if not columns:
+                st.warning(f"Could not retrieve schema information for table '{selected_table}'")
+                schema = None
+            else:
+                # Create schema dictionary with just the loaded table
+                schema = {
+                    selected_table: [(col[0], col[1]) for col in columns]
+                }
+
+            cursor.close()
+        except Exception as e:
+            st.warning(f"Could not retrieve schema: {e}")
+            schema = None
+    else:
+        # Using default connection, get full schema
+        schema = get_db_schema()
 
     if schema:
         # Format schema as text for display and prompts
@@ -78,13 +118,14 @@ def render_sqlbot(llm):
         for table, columns_list in schema.items():
             schema_text += f"Table: {table}\nColumns:\n{chr(10).join([f'- {name} ({dtype})' for name, dtype in columns_list])}\n\n"
 
-        with st.expander("Show Database Schema (from default DB)"):
+        with st.expander("Show Database Schema"):
             st.code(schema_text, language='text')
 
         # SQL Bot UI components
         nl_query_sqlbot = st.text_area(
             "Ask a database question:",
-            placeholder="e.g., How many dormant accounts in 'Dubai' branch from the 'accounts_data' table?",
+            placeholder=f"e.g., How many accounts in '{selected_table}' have been inactive for more than 3 years?" if is_direct_connection
+            else "e.g., How many dormant accounts in 'Dubai' branch from the 'accounts_data' table?",
             height=100,
             key="sql_bot_nl_query_input"
         )
@@ -101,7 +142,14 @@ def render_sqlbot(llm):
             # Generate SQL
             try:
                 with st.spinner("🤖 Converting natural language to SQL..."):
-                    nl_to_sql_prompt = PromptTemplate.from_template(SQL_GENERATION_PROMPT)
+                    # If direct connection, make sure the model specifically uses the loaded table
+                    if is_direct_connection:
+                        nl_to_sql_prompt = PromptTemplate.from_template(
+                            SQL_GENERATION_PROMPT + f"\n\nIMPORTANT: The user is currently viewing the '{selected_table}' table specifically, so ensure your SQL query focuses on this table."
+                        )
+                    else:
+                        nl_to_sql_prompt = PromptTemplate.from_template(SQL_GENERATION_PROMPT)
+
                     nl_to_sql_chain = nl_to_sql_prompt | llm | StrOutputParser()
 
                     sql_query_raw = nl_to_sql_chain.invoke({
@@ -109,17 +157,8 @@ def render_sqlbot(llm):
                         "question": nl_query_sqlbot.strip()
                     })
 
-                    # Clean up the generated SQL
-                    # Look for SELECT statement
-                    match = re.search(r"SELECT.*", sql_query_raw, re.IGNORECASE | re.DOTALL)
-                    if match:
-                        sql_query_generated = match.group(0).strip()
-                    else:
-                        # Fallback to standard cleaning if SELECT is not found explicitly by regex
-                        sql_query_generated_fallback = re.sub(r"^```sql\s*|\s*```$", "", sql_query_raw,
-                                                              flags=re.MULTILINE).strip()
-                        st.warning("Could not find SELECT clearly with regex. Using fallback cleaning.")
-                        sql_query_generated = sql_query_generated_fallback
+                    # Clean up the generated SQL with improved extraction
+                    sql_query_generated = clean_sql_query(sql_query_raw)
 
                     # Validate the generated query is a SELECT statement
                     if not sql_query_generated or not sql_query_generated.lower().strip().startswith("select"):
@@ -155,6 +194,88 @@ def render_sqlbot(llm):
                     if not results_df.empty:
                         st.dataframe(results_df)
                         st.info(f"Query returned {len(results_df)} rows.")
+
+                        # Add visualization options for certain types of results
+                        if len(results_df.columns) >= 2 and len(results_df) > 0 and len(results_df) <= 50:
+                            try:
+                                import plotly.express as px
+
+                                # Check for numeric columns that might be good for visualization
+                                numeric_cols = results_df.select_dtypes(include=['number']).columns.tolist()
+                                all_cols = results_df.columns.tolist()
+
+                                if numeric_cols and len(all_cols) >= 2:
+                                    st.subheader("Visualize Results")
+
+                                    col1, col2 = st.columns(2)
+
+                                    with col1:
+                                        chart_type = st.selectbox(
+                                            "Chart Type",
+                                            ["Bar Chart", "Line Chart", "Scatter Plot", "Pie Chart", "Box Plot"],
+                                            key="vis_chart_type"
+                                        )
+
+                                    with col2:
+                                        # For some charts, we need a categorical column for x-axis
+                                        if chart_type in ["Bar Chart", "Line Chart", "Scatter Plot"]:
+                                            x_col = st.selectbox("X-Axis", all_cols, key="vis_x_col")
+                                            y_col = st.selectbox("Y-Axis", numeric_cols, key="vis_y_col")
+
+                                            if st.button("Generate Chart", key="gen_chart_btn"):
+                                                try:
+                                                    if chart_type == "Bar Chart":
+                                                        fig = px.bar(results_df, x=x_col, y=y_col,
+                                                                     title=f"{y_col} by {x_col}")
+                                                    elif chart_type == "Line Chart":
+                                                        fig = px.line(results_df, x=x_col, y=y_col,
+                                                                      title=f"{y_col} Trend by {x_col}")
+                                                    elif chart_type == "Scatter Plot":
+                                                        fig = px.scatter(results_df, x=x_col, y=y_col,
+                                                                         title=f"{y_col} vs {x_col}")
+
+                                                    st.plotly_chart(fig, use_container_width=True)
+                                                except Exception as viz_e:
+                                                    st.error(f"Visualization error: {viz_e}")
+
+                                        # For pie charts
+                                        elif chart_type == "Pie Chart":
+                                            values_col = st.selectbox("Values", numeric_cols, key="vis_values_col")
+                                            names_col = st.selectbox("Names", all_cols, key="vis_names_col")
+
+                                            if st.button("Generate Chart", key="gen_pie_btn"):
+                                                try:
+                                                    fig = px.pie(results_df, values=values_col, names=names_col,
+                                                                 title=f"{values_col} Distribution")
+                                                    st.plotly_chart(fig, use_container_width=True)
+                                                except Exception as viz_e:
+                                                    st.error(f"Visualization error: {viz_e}")
+
+                                        # For box plots
+                                        elif chart_type == "Box Plot":
+                                            y_col = st.selectbox("Value Column", numeric_cols, key="vis_box_y_col")
+
+                                            # Group by is optional
+                                            use_grouping = st.checkbox("Group by category", key="vis_use_grouping")
+                                            if use_grouping:
+                                                x_col = st.selectbox("Group by", all_cols, key="vis_box_x_col")
+                                                if st.button("Generate Chart", key="gen_box_btn"):
+                                                    try:
+                                                        fig = px.box(results_df, y=y_col, x=x_col,
+                                                                     title=f"{y_col} Distribution by {x_col}")
+                                                        st.plotly_chart(fig, use_container_width=True)
+                                                    except Exception as viz_e:
+                                                        st.error(f"Visualization error: {viz_e}")
+                                            else:
+                                                if st.button("Generate Chart", key="gen_box_simple_btn"):
+                                                    try:
+                                                        fig = px.box(results_df, y=y_col, title=f"{y_col} Distribution")
+                                                        st.plotly_chart(fig, use_container_width=True)
+                                                    except Exception as viz_e:
+                                                        st.error(f"Visualization error: {viz_e}")
+                            except Exception as pkg_e:
+                                st.info(
+                                    "Visualization options not available. Please install plotly for visualization features.")
 
                         # CSV download button for results
                         csv_data = results_df.to_csv(index=False).encode('utf-8')
@@ -204,6 +325,45 @@ def render_sqlbot(llm):
         show_query_history()
     else:
         st.warning("Could not retrieve database schema. SQL Bot is limited.")
+
+
+def clean_sql_query(raw_sql):
+    """
+    Clean and extract SQL query from raw text.
+    Handles various formats including markdown code blocks and backticks.
+    Properly escapes quotes for SQL Server compatibility.
+
+    Args:
+        raw_sql (str): The raw SQL query text to clean
+
+    Returns:
+        str: A cleaned SQL query ready for execution
+    """
+    if not raw_sql:
+        return ""
+
+    # First, remove any markdown code blocks
+    clean_sql = re.sub(r"```sql\s*|\s*```", "", raw_sql, flags=re.IGNORECASE)
+
+    # Handle any other code fence markers that might be present
+    clean_sql = re.sub(r"```.*?\s*|\s*```", "", clean_sql, flags=re.IGNORECASE)
+
+    # Try to extract a valid SQL statement (SELECT, INSERT, UPDATE, etc.)
+    sql_pattern = re.compile(r"(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|EXEC|EXECUTE).*?(?:;|$)",
+                             re.IGNORECASE | re.DOTALL)
+
+    match = sql_pattern.search(clean_sql)
+    if match:
+        clean_sql = match.group(0).strip()
+
+    # Remove trailing semicolons as they can cause issues with some SQL Server drivers
+    clean_sql = clean_sql.rstrip(';')
+
+    # Handle potential quote issues for SQL Server
+    # This is a potential fix for the 'VIP' issue where nested quotes cause problems
+    clean_sql = clean_sql.replace("''", "'")  # Replace double single quotes with single quotes
+
+    return clean_sql.strip()
 
 
 def show_query_history():

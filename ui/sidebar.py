@@ -26,7 +26,7 @@ def render_sidebar():
         [
             "**Upload File (CSV/XLSX/JSON)**",
             "**Upload via URL**",
-            "**Load Data from Azure SQL (into App)**"
+            "**Load Data from Azure SQL Database**"
         ],
         key="upload_method_radio"
     )
@@ -84,67 +84,70 @@ def handle_upload_method(upload_method):
             else:
                 st.sidebar.warning("⚠️ Please enter a valid URL")
 
-    elif upload_method == "**Load Data from Azure SQL (into App)**":
+    elif upload_method == "**Load Data from Azure SQL Database**":
         uploaded_data_source = handle_sql_upload()
 
     return uploaded_data_source
 
 
 def handle_sql_upload():
-    """Handle the SQL upload option and return data if loaded successfully."""
+    """
+    Handle loading data from Azure SQL Database.
+    Returns a DataFrame if loaded successfully, None otherwise.
+    """
     st.sidebar.subheader("Azure SQL Data Loader")
-    st.sidebar.markdown("*(Connect to a specific DB/table to load data into the application's memory.)*")
+    st.sidebar.markdown("*(Connect to database to load all table data into the application's memory.)*")
 
-    use_secrets_for_conn_upload = st.sidebar.checkbox(
-        "Use credentials from secrets.toml (for loading)",
+    use_secrets = st.sidebar.checkbox(
+        "Use credentials from secrets.toml",
         value=True,
-        key="use_secrets_checkbox_upload"
+        key="use_secrets_checkbox"
     )
 
-    # Default values for manual input fields
-    input_db_server_upload = DB_SERVER
-    input_db_name_upload = DB_NAME
-    input_db_username_upload = ""
-    input_db_password_upload = ""
-    input_use_entra_upload = False
-    input_entra_domain_upload = ""
+    # Default values
+    input_db_server = DB_SERVER
+    input_db_name = DB_NAME
+    input_db_username = ""
+    input_db_password = ""
+    input_use_entra = False
+    input_entra_domain = ""
 
     # Display manual input fields if use_secrets is False
-    if not use_secrets_for_conn_upload:
+    if not use_secrets:
         st.sidebar.warning("⚠️ Secrets credentials disabled. Please enter manual connection details.")
 
-        input_db_server_upload = st.sidebar.text_input(
-            "Azure SQL Server (Loader):",
+        input_db_server = st.sidebar.text_input(
+            "Azure SQL Server:",
             value=DB_SERVER,
-            key="db_server_input_upload"
+            key="db_server_input"
         )
 
-        input_db_name_upload = st.sidebar.text_input(
-            "Database Name (Loader):",
+        input_db_name = st.sidebar.text_input(
+            "Database Name:",
             value=DB_NAME,
-            key="db_name_input_upload"
+            key="db_name_input"
         )
 
-        input_db_username_upload = st.sidebar.text_input(
-            "Username (Loader):",
-            key="db_username_input_upload"
+        input_db_username = st.sidebar.text_input(
+            "Username:",
+            key="db_username_input"
         )
 
-        input_db_password_upload = st.sidebar.text_input(
-            "Password (Loader):",
+        input_db_password = st.sidebar.text_input(
+            "Password:",
             type="password",
-            key="db_password_input_upload"
+            key="db_password_input"
         )
 
-        input_use_entra_upload = st.sidebar.checkbox(
-            "Use Microsoft Entra Authentication (Loader)",
-            key="use_entra_checkbox_upload"
+        input_use_entra = st.sidebar.checkbox(
+            "Use Microsoft Entra Authentication",
+            key="use_entra_checkbox"
         )
 
-        if input_use_entra_upload:
-            input_entra_domain_upload = st.sidebar.text_input(
-                "Microsoft Entra Domain (Loader):",
-                key="entra_domain_input_upload",
+        if input_use_entra:
+            input_entra_domain = st.sidebar.text_input(
+                "Microsoft Entra Domain:",
+                key="entra_domain_input",
                 placeholder="e.g., yourdomain.onmicrosoft.com"
             )
     else:
@@ -153,20 +156,21 @@ def handle_sql_upload():
         st.sidebar.info(f"Default Server: {DB_SERVER}")
         st.sidebar.info(f"Default Database: {DB_NAME}")
 
-    # SQL query input
-    sql_query_input_upload = st.sidebar.text_area(
-        "SQL Query to Load Data:",
-        value="SELECT * FROM accounts_data",
-        height=100,
-        key="azure_sql_query_input_upload"
+    # Table selector
+    table_options = ["accounts_data", "customer_data", "transaction_history", "communication_records",
+                     "compliance_flags"]
+    selected_table = st.sidebar.selectbox(
+        "Select table to load:",
+        table_options,
+        key="table_selector"
     )
 
     # Advanced connection options
     with st.sidebar.expander("Advanced Connection Options"):
-        use_port_in_conn = st.checkbox(
+        use_port = st.checkbox(
             "Include port in connection string",
             value=True,
-            key="use_port_in_conn_upload"
+            key="use_port_checkbox"
         )
 
         driver_version = st.selectbox(
@@ -176,13 +180,13 @@ def handle_sql_upload():
                 "ODBC Driver 17 for SQL Server",
                 "SQL Server Native Client 11.0"
             ],
-            key="driver_version_upload"
+            key="driver_version"
         )
 
-        trust_server_cert = st.checkbox(
+        trust_cert = st.checkbox(
             "Trust Server Certificate",
             value=False,
-            key="trust_server_cert_upload"
+            key="trust_cert_checkbox"
         )
 
         timeout_seconds = st.number_input(
@@ -190,109 +194,157 @@ def handle_sql_upload():
             min_value=15,
             max_value=300,
             value=60,
-            key="timeout_seconds_upload"
+            key="timeout_seconds"
         )
 
-    if st.sidebar.button("Connect & Load Data", key="connect_azure_sql_button_upload"):
-        if sql_query_input_upload:
-            with st.spinner("⏳ Connecting to Azure SQL Database and loading data..."):
-                conn_upload = None
-                uploaded_df = None
+        # Optional row limit for large tables
+        use_row_limit = st.checkbox(
+            "Apply row limit (for large tables)",
+            value=False,
+            key="use_row_limit"
+        )
 
-                try:
-                    # Construct connection string
-                    conn_str_upload = create_connection_string(
-                        use_secrets_for_conn_upload,
-                        input_db_server_upload,
-                        input_db_name_upload,
-                        input_db_username_upload,
-                        input_db_password_upload,
-                        input_use_entra_upload,
-                        input_entra_domain_upload,
-                        use_port_in_conn,
-                        driver_version,
-                        trust_server_cert,
-                        timeout_seconds
-                    )
-
-                    # Try database connection
-                    debug_conn_str = mask_connection_string(conn_str_upload)
-                    st.sidebar.info(f"Connecting with: {debug_conn_str}")
-
-                    conn_upload = pyodbc.connect(conn_str_upload)
-
-                    # Run query
-                    if conn_upload:
-                        try:
-                            # First check if the query can be executed without errors
-                            test_cursor = conn_upload.cursor()
-                            test_cursor.execute(sql_query_input_upload)
-                            test_cursor.close()
-
-                            # Now use pd.read_sql_query to get the data as a DataFrame
-                            uploaded_df = pd.read_sql_query(sql_query_input_upload, conn_upload)
-
-                            if uploaded_df.empty:
-                                st.sidebar.warning("Query returned no results.")
-                            else:
-                                st.sidebar.success(f"✅ Query successful! Retrieved {len(uploaded_df)} rows.")
-
-                                # Display a preview of the data in the sidebar
-                                with st.sidebar.expander("Preview Data"):
-                                    st.dataframe(uploaded_df.head(5))
-
-                                # Add an automatic process button
-                                if st.sidebar.button("Process this data now", key="auto_process_sql_data"):
-                                    process_uploaded_data(uploaded_df)
-                                else:
-                                    st.sidebar.info(
-                                        "Click 'Process Uploaded/Fetched Data' button at the top of the sidebar to use this data."
-                                    )
-
-                        except pyodbc.Error as sql_e:
-                            st.sidebar.error(f"❌ SQL Query Error: {sql_e}")
-
-                    else:
-                        st.sidebar.error("❌ Failed to establish database connection for loading.")
-
-                except pyodbc.Error as e:
-                    st.sidebar.error(f"❌ DB Connection Error: {e}")
-                    # Provide more specific error guidance
-                    if "08001" in str(e):
-                        st.sidebar.warning(
-                            "Cannot reach the server. Check server name, firewall rules, and network connection."
-                        )
-                    elif "28000" in str(e):
-                        st.sidebar.warning("Login failed. Check username and password.")
-                    elif "42000" in str(e):
-                        st.sidebar.warning(
-                            "Database access error. Check if the database exists and user has permission."
-                        )
-                    elif "01000" in str(e) and "TLS" in str(e):
-                        st.sidebar.warning(
-                            "SSL/TLS error. Try enabling 'Trust Server Certificate' in Advanced Connection Options."
-                        )
-
-                except ValueError as e:
-                    st.sidebar.error(f"❌ Configuration Error: {e}")
-
-                except Exception as e:
-                    st.sidebar.error(f"❌ An unexpected error occurred during data loading: {e}")
-
-                finally:
-                    # Close connection
-                    if conn_upload:
-                        try:
-                            conn_upload.close()
-                            st.sidebar.success("Connection closed successfully.")
-                        except Exception as e:
-                            st.sidebar.warning(f"Failed to close loading connection: {e}")
-
-                return uploaded_df
+        if use_row_limit:
+            row_limit = st.number_input(
+                "Maximum rows to load",
+                min_value=100,
+                max_value=1000000,
+                value=10000,
+                step=1000,
+                key="row_limit_value"
+            )
         else:
-            st.sidebar.warning("⚠️ Please enter an SQL query.")
+            row_limit = None
+
+    # Create two columns for different actions
+    col1, col2 = st.sidebar.columns(2)
+
+    with col1:
+        # Button to connect and immediately process data
+        if st.button("Connect & Process", key="connect_process_btn"):
+            df = connect_to_database(input_db_server, input_db_name, selected_table, use_secrets, input_db_username,
+                                     input_db_password,
+                                     input_use_entra, input_entra_domain, use_port, driver_version, trust_cert,
+                                     timeout_seconds, use_row_limit, row_limit)
+            if df is not None and not df.empty:
+                # Immediately process the data
+                process_uploaded_data(df)
+                return df
+            return None
+
+    with col2:
+        # Button to connect and load data without processing
+        if st.button("Load Only", key="connect_database_button"):
+            df = connect_to_database(input_db_server, input_db_name, selected_table, use_secrets, input_db_username,
+                                     input_db_password,
+                                     input_use_entra, input_entra_domain, use_port, driver_version, trust_cert,
+                                     timeout_seconds, use_row_limit, row_limit)
+            return df
 
     return None
+
+
+def connect_to_database(server, database, table, use_secrets, username, password, use_entra, entra_domain,
+                        use_port, driver, trust_cert, timeout, use_row_limit, row_limit):
+    """Helper function to connect to database and load data"""
+    with st.spinner(f"⏳ Connecting to Azure SQL Database and loading {table}..."):
+        conn = None
+        df = None
+
+        try:
+            # Construct connection string
+            conn_str = create_connection_string(
+                use_secrets, server, database, username, password,
+                use_entra, entra_domain, use_port, driver, trust_cert, timeout
+            )
+
+            # Try database connection
+            debug_conn_str = mask_connection_string(conn_str)
+            st.sidebar.info(f"Connecting with: {debug_conn_str}")
+
+            conn = pyodbc.connect(conn_str)
+
+            # Create SQL query based on selected table and optional row limit
+            if use_row_limit and row_limit:
+                sql_query = f"SELECT TOP {row_limit} * FROM {table}"
+            else:
+                sql_query = f"SELECT * FROM {table}"
+
+            # Run query
+            if conn:
+                try:
+                    # First check if the table exists and query can be executed
+                    test_cursor = conn.cursor()
+                    try:
+                        test_cursor.execute(sql_query)
+                        test_cursor.close()
+                    except pyodbc.Error as table_e:
+                        st.sidebar.error(f"❌ Table Access Error: {table_e}")
+                        if "Invalid object name" in str(table_e):
+                            st.sidebar.warning(f"Table '{table}' does not exist in the database.")
+                        elif "permission" in str(table_e).lower():
+                            st.sidebar.warning(f"You don't have permission to access table '{table}'.")
+                        return None
+
+                    # Now use pd.read_sql_query to get the data as a DataFrame
+                    df = pd.read_sql_query(sql_query, conn)
+
+                    if df.empty:
+                        st.sidebar.warning(f"Table '{table}' has no data.")
+                    else:
+                        # Store the original loading timestamp to help with debugging
+                        st.session_state["sql_load_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                        if use_row_limit and row_limit and len(df) == row_limit:
+                            st.sidebar.success(f"✅ Loaded {len(df)} rows from '{table}' (row limit reached).")
+                        else:
+                            st.sidebar.success(f"✅ Loaded {len(df)} rows from '{table}'.")
+
+                        # Display a preview of the data in the sidebar
+                        with st.sidebar.expander("Preview Data"):
+                            st.dataframe(df.head(5))
+
+                        # Store DB connection and table info in session state for SQL Bot
+                        st.session_state["db_connection"] = conn
+                        st.session_state["sql_table_schema"] = table
+
+                        # Also store a copy of the DataFrame directly in session state
+                        # This provides a backup method for agents to access the data
+                        st.session_state["db_loaded_data"] = df
+
+                        return df
+
+                except pyodbc.Error as sql_e:
+                    st.sidebar.error(f"❌ SQL Query Error: {sql_e}")
+
+            else:
+                st.sidebar.error("❌ Failed to establish database connection for loading.")
+
+        except pyodbc.Error as e:
+            st.sidebar.error(f"❌ DB Connection Error: {e}")
+            # Provide more specific error guidance
+            if "08001" in str(e):
+                st.sidebar.warning(
+                    "Cannot reach the server. Check server name, firewall rules, and network connection."
+                )
+            elif "28000" in str(e):
+                st.sidebar.warning("Login failed. Check username and password.")
+            elif "42000" in str(e):
+                st.sidebar.warning(
+                    "Database access error. Check if the database exists and user has permission."
+                )
+            elif "01000" in str(e) and "TLS" in str(e):
+                st.sidebar.warning(
+                    "SSL/TLS error. Try enabling 'Trust Server Certificate' in Advanced Connection Options."
+                )
+
+        except ValueError as e:
+            st.sidebar.error(f"❌ Configuration Error: {e}")
+
+        except Exception as e:
+            st.sidebar.error(f"❌ An unexpected error occurred: {e}")
+
+        return None
 
 
 def create_connection_string(
@@ -405,9 +457,13 @@ def process_uploaded_data(uploaded_data_source):
             df_parsed = None
 
     if df_parsed is not None and not df_parsed.empty:
-        # Data was successfully parsed
+        # Data was successfully parsed - CRITICAL: Set these session state variables for the analyzers
         st.session_state[SESSION_APP_DF] = df_parsed
         st.session_state[SESSION_DATA_PROCESSED] = True
+
+        # Extra logging to help diagnose issues
+        st.sidebar.info(f"✓ Set SESSION_APP_DF with {len(df_parsed)} rows and {len(df_parsed.columns)} columns")
+        st.sidebar.info(f"✓ Set SESSION_DATA_PROCESSED to True")
 
         # Update chat message
         from config import SESSION_CHAT_MESSAGES, SESSION_COLUMN_MAPPING
@@ -422,19 +478,6 @@ def process_uploaded_data(uploaded_data_source):
             f"You can now use the other modes for analysis."
         )
         st.session_state[SESSION_CHAT_MESSAGES] = [{"role": "assistant", "content": initial_message}]
-
-        # Attempt to save processed data to the default database
-        from database.schema import init_db
-        db_initialized = init_db()
-        if db_initialized:
-            with st.spinner("💾 Saving processed data to default Azure SQL DB..."):
-                save_success = save_to_db(st.session_state[SESSION_APP_DF])
-            if save_success:
-                st.sidebar.success(f"✅ Processed data saved to default DB!")
-            else:
-                st.sidebar.error("Processed data, but failed to save to default DB.")
-        else:
-            st.sidebar.warning("Skipped saving data to DB because default DB connection/initialization failed.")
 
         # Show success message
         st.sidebar.success("✅ Data processed successfully!")

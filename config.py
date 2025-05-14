@@ -1,45 +1,25 @@
 import os
-import streamlit as st
 
-# Azure SQL Database connection parameters
-DB_SERVER = os.getenv("DB_SERVER", "agentdb123.database.windows.net")
-DB_NAME = os.getenv("DB_NAME", "compliance_db")
-DB_PORT = os.getenv("DB_PORT", 1433)  # Port is often 1433 for Azure SQL
+# Application constants
+APP_TITLE = "Banking Compliance Analysis Tool"
+APP_SUBTITLE = """
+This tool helps identify dormant accounts and analyze compliance requirements 
+according to banking regulations.
+"""
 
-# Default credentials for app login
-APP_USERNAME = os.getenv("APP_USERNAME", "admin")
-APP_PASSWORD = os.getenv("APP_PASSWORD", "pass123")
+# Session state keys
+SESSION_APP_DF = "app_df"                   # DataFrame with processed data
+SESSION_CHAT_MESSAGES = "chat_messages"      # Chat history
+SESSION_DATA_PROCESSED = "data_processed"    # Flag for data processing
+SESSION_COLUMN_MAPPING = "column_mapping"    # Mapping of standardized to original column names
 
-# Constants for session state keys
-SESSION_LOGGED_IN = "logged_in"
-SESSION_APP_DF = "app_df"
-SESSION_DATA_PROCESSED = "data_processed"
-SESSION_CHAT_MESSAGES = "chat_messages"
-SESSION_COLUMN_MAPPING = "column_mapping"
+# Database configuration
+# Try to get from environment variables or use defaults
+DB_SERVER = os.environ.get("DB_SERVER", "agentdb123.database.windows.net")
+DB_NAME = os.environ.get("DB_NAME", "banking_compliance")
+DB_PORT = os.environ.get("DB_PORT", "1433")  # Default for SQL Server
 
-# Default thresholds
-DEFAULT_DORMANT_DAYS = 3 * 365  # 3 years
-DEFAULT_FREEZE_DAYS = 5 * 365  # 5 years
-DEFAULT_CBUAE_DATE = "2020-04-24"  # Example CBUAE date
-
-# List of available plot types for visualization
-ALLOWED_PLOTS = ['bar', 'pie', 'histogram', 'box', 'scatter']
-
-
-# Initialize streamlit session state
-def init_session_state():
-    """Initialize session state variables if they don't exist."""
-    if SESSION_LOGGED_IN not in st.session_state:
-        st.session_state[SESSION_LOGGED_IN] = False
-
-    if SESSION_APP_DF not in st.session_state:
-        st.session_state[SESSION_APP_DF] = None
-
-    if SESSION_DATA_PROCESSED not in st.session_state:
-        st.session_state[SESSION_DATA_PROCESSED] = False
-
-    if SESSION_CHAT_MESSAGES not in st.session_state:
-        st.session_state[SESSION_CHAT_MESSAGES] = [{"role": "assistant", "content": "Hi! Please upload data first..."}]
-
-    if SESSION_COLUMN_MAPPING not in st.session_state:
-        st.session_state[SESSION_COLUMN_MAPPING] = {}
+# Default threshold values (days)
+DEFAULT_DORMANT_DAYS = 365  # 1 year
+DEFAULT_FREEZE_DAYS = 730   # 2 years
+DEFAULT_CBUAE_DATE = "2023-01-01"  # Default cutoff date for CBUAE transfers

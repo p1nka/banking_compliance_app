@@ -1,251 +1,225 @@
 import os
 import streamlit as st
-import re  # Make sure this is included for regex in the dummy classes
 
-# Try to import Langchain/Groq
-try:
-    from langchain_groq import ChatGroq
-    from langchain_core.prompts import PromptTemplate
-    from langchain_core.messages import HumanMessage, AIMessage
-    from langchain_core.output_parsers import StrOutputParser
+# Prompts for AI responses
+SQL_GENERATION_PROMPT = """
+You are a database expert who specializes in translating natural language queries into SQL.
 
-    LANGCHAIN_AVAILABLE = True
-except ImportError:
-    st.warning(
-        "Langchain/Groq libraries not found. AI features will be disabled. Install with: pip install langchain langchain-groq"
-    )
-    LANGCHAIN_AVAILABLE = False
+The user will ask questions about their database, and you will generate the correct SQL query to answer their question.
 
-
-    # Define dummy classes/functions if Langchain is not available to avoid NameErrors later
-    class ChatGroq:
-        def __init__(self, **kwargs):
-            pass
-
-        def invoke(self, messages):
-            # Simulate AIMessage structure with content attribute
-            dummy_response = lambda: None
-            dummy_response.content = "AI features are disabled. Please install required packages."
-            return dummy_response
-
-
-    class PromptTemplate:
-        def __init__(self):
-            pass
-
-        @staticmethod
-        def from_template(text):
-            # Store template text for potential inspection later if needed
-            prompt_template = lambda: None  # Simple object to hold attributes
-            prompt_template.template = text
-            # Basic extraction of variables (might not be perfectly robust for complex templates)
-            prompt_template.input_variables = re.findall(r"\{(\w+)\}", text)
-
-            # Return a dummy object that can be invoked (returning formatted text)
-            class DummyPrompt:
-                def __init__(self, template, variables):
-                    self.template = template
-                    self.input_variables = variables
-
-                def format(self, **kwargs):
-                    formatted_text = self.template
-                    for key, value in kwargs.items():
-                        # Escape braces in values to prevent accidental formatting
-                        escaped_value = str(value).replace("{", "{{").replace("}", "}}")
-                        formatted_text = formatted_text.replace(f"{{{key}}}", escaped_value)
-                    return formatted_text
-
-            return DummyPrompt(text, prompt_template.input_variables)
-
-
-    class HumanMessage:
-        def __init__(self, content): self.content = content  # Basic init for dummy
-
-
-    class AIMessage:
-        def __init__(self, content): self.content = content  # Basic init for dummy
-
-
-    class StrOutputParser:
-        def __init__(self): pass  # Dummy init
-
-        def invoke(self, input_data):
-            # Assuming input_data is the AIMessage object or similar
-            if hasattr(input_data, 'content'):
-                return str(input_data.content)
-            return str(input_data)  # Fallback
-
-
-@st.cache_resource(show_spinner="Loading AI Assistant...")
-def load_llm():
-    """Loads the Groq LLM using API key from st.secrets or environment variables."""
-    if not LANGCHAIN_AVAILABLE:
-        st.warning("Langchain/Groq not available. AI features will be disabled.")
-        return None
-
-    api_key = None
-    secrets_available = hasattr(st, 'secrets')
-
-    # Prioritize Streamlit secrets
-    if secrets_available:
-        try:
-            api_key = st.secrets.get("GROQ_API_KEY")
-        except Exception as e:
-            st.error(f"Error accessing GROQ_API_KEY secrets: {e}. Trying environment variable.")
-
-    # Fallback to Environment Variable
-    if api_key is None:
-        api_key = os.getenv("GROQ_API_KEY")
-
-    if not api_key:
-        st.error("❗️ GROQ API Key not found.")
-        st.info(
-            "To use the AI features, please ensure:\n"
-            "1. The file `.streamlit/secrets.toml` exists and contains `GROQ_API_KEY = \"YOUR_ACTUAL_GROQ_API_KEY\"` OR\n"
-            "2. A `GROQ_API_KEY` environment variable is set.\n"
-            "3. You have restarted the Streamlit app after setting."
-        )
-        return None
-
-    try:
-        # Use a smaller model if 70b is too slow or costly, e.g., "llama3-8b-8192"
-        llm_instance = ChatGroq(temperature=0.2, model_name="llama3-70b-8192", api_key=api_key, request_timeout=120)
-
-        # Test the API key with a simple call
-        try:
-            # Use a trivial prompt to test connectivity
-            test_message = [HumanMessage(content="Say 'API key is valid'")]
-            _ = llm_instance.invoke(test_message)
-            st.sidebar.success("✅ AI Assistant Loaded!")
-            return llm_instance
-        except Exception as test_e:
-            if "invalid_api_key" in str(test_e).lower() or "invalid api key" in str(test_e).lower():
-                st.error("🚨 Invalid Groq API Key. Please check your API key and try again.")
-            else:
-                st.error(f"🚨 Error testing Groq client: {test_e}")
-            return None
-    except Exception as e:
-        st.error(f"🚨 Failed to initialize Groq client: {e}")
-        st.info("Please verify your GROQ_API_KEY value and ensure you have internet connectivity.")
-        return None
-
-
-# Function to create a fallback response when LLM is not available
-def get_fallback_response(prompt_type, inputs=None):
-    """
-    Generate fallback responses when LLM is not available.
-
-    Args:
-        prompt_type (str): The type of prompt (summary, explanation, etc.)
-        inputs (dict, optional): Input parameters to customize the response
-
-    Returns:
-        str: A generic fallback response
-    """
-    if prompt_type == "dormant_summary":
-        return "AI summary not available. Please check your Groq API key configuration to enable AI features."
-
-    elif prompt_type == "compliance_summary":
-        return "AI compliance summary not available. Please check your Groq API key configuration to enable AI features."
-
-    elif prompt_type == "sql_generation":
-        return "SELECT * FROM accounts_data LIMIT 10; -- AI-generated SQL not available. This is a fallback query."
-
-    elif prompt_type == "sql_explanation":
-        return "SQL query explanation not available. Please check your Groq API key configuration to enable AI features."
-
-    elif prompt_type == "observation":
-        return "Data observation not available. AI features are disabled due to API configuration issues."
-
-    elif prompt_type == "trend":
-        return "Trend analysis not available. AI features are disabled due to API configuration issues."
-
-    elif prompt_type == "narration":
-        return "Executive summary not available. AI features are disabled due to API configuration issues."
-
-    elif prompt_type == "action":
-        return "Recommended actions not available. AI features are disabled due to API configuration issues."
-
-    else:
-        return "AI response not available. Please check your Groq API key configuration to enable AI features."
-
-
-# Common prompts for different use cases
-DORMANT_SUMMARY_PROMPT = """Act as a Senior Compliance Analyst AI. You have analyzed a dataset of banking accounts.
-Below is a numerical summary of accounts identified by specific dormant/inactivity criteria:
-
-{analysis_details}
-
-Based on these findings, provide a concise executive summary highlighting key risks, trends, and observations regarding dormant accounts. Keep it professional and focused on compliance implications.
-
-Executive Summary:"""
-
-COMPLIANCE_SUMMARY_PROMPT = """Act as a Senior Banking Compliance Officer AI. You have reviewed the output of several compliance agents.
-Here are the counts and descriptions of accounts identified by each compliance check:
-
-{compliance_details}
-
-Provide a brief executive summary highlighting the most significant compliance risks and areas requiring immediate attention based on these findings. Focus on actionable insights for the compliance team.
-
-Compliance Summary:"""
-
-OBSERVATION_PROMPT = """You are a senior bank analyst. Analyze the following sample data from identified dormant/inactive accounts and provide only key observations about the dataset structure, common values, or patterns.
-
-Sample Data (CSV):
-{data}
-
-Observations:"""
-
-TREND_PROMPT = """You are a data strategist. Given the following sample data from a banking compliance analysis, identify potential trends or significant findings relevant to compliance or risk.
-
-Sample Data (CSV):
-{data}
-
-Trends and Findings:"""
-
-NARRATION_PROMPT = """You are writing a CXO summary based on compliance analysis. Using the provided observations and trends, craft a concise executive summary (max 3-4 sentences) suitable for a busy executive.
-
-Observations:
-{observation}
-
-Trends:
-{trend}
-
-Executive Summary:"""
-
-ACTION_PROMPT = """You are a strategic advisor to a bank's compliance department. Based on the following observations and trends, suggest specific, actionable steps the bank should take to address the identified issues.
-
-Observations:
-{observation}
-
-Trends:
-{trend}
-
-Recommended Actions:"""
-
-SQL_GENERATION_PROMPT = """You are an expert Azure SQL query generator. Given the database schema and a user question in natural language, generate *only* the valid T-SQL query that answers the question.
-Adhere strictly to the schema provided. Only use tables and columns exactly as they are named in the schema.
-The database is Azure SQL Server. Ensure the query syntax is correct for T-SQL.
-Prioritize using the 'accounts_data' table for general account questions. Use 'dormant_flags' or 'sql_query_history' if the question is specifically about those logs.
-The user expects a query to *retrieve* data. Generate *only* SELECT statements. Do NOT generate INSERT, UPDATE, DELETE, CREATE, ALTER, or DROP statements, or any other SQL commands.
-Do NOT include any explanations, greetings, or markdown code block formatting (```sql```) around the query. Just output the plain SQL query text.
-If the question cannot be answered using *only* the provided schema and *only* a SELECT query, output a polite message stating that you cannot answer that query based on the schema.
-
-Database Schema (Azure SQL):
+Database Schema:
 {schema}
 
-User question: {question}
+User Question: {question}
 
-T-SQL Query:"""
+Generate a SQL query to answer this question. Be specific and make sure to handle NULL values appropriately. 
+Only use tables and columns that appear in the schema provided.
+Do not include any explanations, just provide the SQL query itself.
 
-SQL_EXPLANATION_PROMPT = """You are a data analyst explaining an SQL query. Provide a clear, concise explanation of what the following T-SQL query does, referencing the provided database schema.
+The query should be written for SQL Server/Azure SQL Database.
+"""
+
+SQL_EXPLANATION_PROMPT = """
+You are a database expert who specializes in explaining SQL queries in simple terms.
 
 Database Schema:
 {schema}
 
 SQL Query:
-```sql
 {sql_query}
+
+Please explain this SQL query in clear, simple language that a non-technical person could understand. 
+Include the following in your explanation:
+1. What data is being retrieved or modified
+2. What conditions/filters are being applied
+3. How the results are organized or sorted
+4. Any potential performance considerations
+
+Your explanation should be concise yet comprehensive.
+"""
+
+DORMANT_SUMMARY_PROMPT = """
+You are a financial compliance expert summarizing the results of a dormant account analysis.
+
+Here is the raw analysis data:
+{analysis_details}
+
+Please provide a clear, executive-level summary of these findings. Your summary should:
+1. Highlight the key numbers and their significance
+2. Identify any patterns or trends
+3. Explain the implications for banking compliance
+4. Use professional but accessible language
+
+Make your summary comprehensive but concise, suitable for a busy banking executive.
+"""
+
+COMPLIANCE_SUMMARY_PROMPT = """
+You are a financial compliance expert summarizing the results of a banking compliance analysis.
+
+Here is the raw compliance data:
+{compliance_details}
+
+Please provide a clear, executive-level summary of these findings. Your summary should:
+1. Highlight the key compliance issues and their significance
+2. Identify any regulatory risks
+3. Explain the implications for banking operations
+4. Suggest high-level next steps
+
+Make your summary comprehensive but concise, suitable for a busy banking executive.
+"""
+
+OBSERVATION_PROMPT = """
+Analyze the following dormant account data and provide key observations:
+
+```
+{data}
 ```
 
-Explanation:"""
+Provide 3-5 specific observations about the data. Focus on patterns, anomalies, or notable characteristics 
+that would be relevant to a banking compliance officer. Be specific and quantitative when possible.
+"""
+
+TREND_PROMPT = """
+Analyze the following dormant account data and identify trends:
+
+```
+{data}
+```
+
+Identify 2-4 significant trends or patterns in this data. Focus on changes over time, 
+relationships between variables, or clusters/groupings that would be relevant for compliance risk assessment.
+Be specific and insightful in your analysis.
+"""
+
+NARRATION_PROMPT = """
+Based on the observations and trends identified in dormant account analysis, 
+create a concise executive summary:
+
+Observations:
+{observation}
+
+Trends:
+{trend}
+
+Write a concise, clear summary that synthesizes the above information into a coherent narrative 
+about the dormant accounts situation. Focus on the big picture and implications for compliance management.
+This should be suitable for a banking executive who needs to understand the situation quickly.
+"""
+
+ACTION_PROMPT = """
+Based on the dormant account analysis, recommend specific actions:
+
+Observations:
+{observation}
+
+Trends:
+{trend}
+
+Provide 3-5 specific, actionable recommendations for the bank's compliance team. 
+Each recommendation should:
+1. Directly address an issue identified in the analysis
+2. Be specific and concrete
+3. Include a clear rationale
+4. Prioritize regulatory compliance and risk mitigation
+
+Format each recommendation as a clear action item.
+"""
+
+
+def get_llm():
+    """
+    Get a language model instance for generating AI responses.
+    Returns None if LangChain is not installed or no API key is found.
+    """
+    # First check if LangChain is installed
+    try:
+        import langchain
+    except ImportError:
+        st.sidebar.warning("⚠️ LangChain not installed. AI features will be unavailable.")
+        return None
+
+    # Then try to get Groq module
+    try:
+        from langchain.llms import Groq
+    except ImportError:
+        try:
+            # Try newer version of LangChain
+            from langchain_groq import ChatGroq
+            st.sidebar.info("Using ChatGroq from langchain_groq")
+        except ImportError:
+            st.sidebar.warning("⚠️ Groq integration not installed. Run: pip install langchain-groq")
+            return None
+
+    # Try to get API key
+    groq_api_key = None
+
+    # Check Streamlit secrets first
+    if hasattr(st, 'secrets') and 'GROQ_API_KEY' in st.secrets:
+        groq_api_key = st.secrets['GROQ_API_KEY']
+
+    # Fall back to environment variables
+    if not groq_api_key:
+        groq_api_key = os.getenv('GROQ_API_KEY')
+
+    # If no API key is available, return None
+    if not groq_api_key:
+        st.sidebar.warning("⚠️ GROQ API key not found in secrets or environment variables.")
+        st.sidebar.info(
+            "To enable AI features, add GROQ_API_KEY to your .streamlit/secrets.toml or as an environment variable.")
+        return None
+
+    # Create and return the LLM
+    try:
+        # Try with langchain.llms (older version)
+        try:
+            from langchain.llms import Groq
+            llm = Groq(
+                api_key=groq_api_key,
+                model_name="llama3-70b-8192",
+                max_tokens=4000,
+                temperature=0.2,
+            )
+            st.sidebar.success("✅ Connected to Groq API (llama3-70b)")
+            return llm
+        except (ImportError, AttributeError):
+            # Try with newer langchain_groq
+            try:
+                from langchain_groq import ChatGroq
+                llm = ChatGroq(
+                    api_key="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",
+                    model_name="llama3-70b-8192",
+                    max_tokens=4000,
+                    temperature=0.2,
+                )
+                st.sidebar.success("✅ Connected to Groq API (llama3-70b) using ChatGroq")
+                return llm
+            except ImportError:
+                st.sidebar.error("Failed to create Groq LLM. Please install with: pip install langchain-groq")
+                return None
+    except Exception as e:
+        st.sidebar.error(f"Error initializing LLM: {e}")
+        return None
+
+
+def get_fallback_response(response_type):
+    """
+    Get a fallback response when the LLM is not available or fails.
+
+    Args:
+        response_type: The type of response needed
+
+    Returns:
+        A fallback response string
+    """
+    fallback_responses = {
+        "sql_generation": "SELECT TOP 10 * FROM accounts_data WHERE Expected_Account_Dormant = 'Yes'",
+        "sql_explanation": "This query fetches basic information about dormant accounts from the database.",
+        "dormant_summary": "Analysis shows multiple dormant accounts requiring review according to compliance guidelines.",
+        "compliance_summary": "Several accounts require attention for compliance with regulatory requirements.",
+        "observation": "The data shows multiple dormant accounts with varying inactivity periods.",
+        "trend": "There appears to be an increasing trend in dormant accounts over time.",
+        "narration": "The bank has several dormant accounts that require attention to maintain regulatory compliance.",
+        "action": "Review identified dormant accounts and initiate contact with account holders following regulated procedures."
+    }
+
+    return fallback_responses.get(response_type, "AI response not available.")

@@ -1,141 +1,129 @@
 import pandas as pd
-import streamlit as st
+import numpy as np
+from datetime import datetime
 from io import StringIO
-import traceback
+import streamlit as st
 from config import SESSION_COLUMN_MAPPING
 
-@st.cache_data(show_spinner="Parsing data...")
-def parse_data(file_input):
-    """Parses data, standardizes column names, converts types, and stores original names."""
+
+# Caching the parse function to improve performance on repeated calls
+@st.cache_data
+def parse_data(data_source):
+    """
+    Parse uploaded data into a standardized format for the application.
+
+    Args:
+        data_source: File upload, DataFrame, or string data
+
+    Returns:
+        DataFrame with standardized columns
+    """
+    # Convert the data source to a DataFrame
     df = None
-    original_columns = []
     try:
-        if isinstance(file_input, pd.DataFrame):
-            st.sidebar.info("Processing data from DataFrame object...")
-            df = file_input.copy()
-            original_columns = list(df.columns)
-        elif hasattr(file_input, 'name'):
-            name = file_input.name.lower()
-            st.sidebar.info(f"Processing file: {name}")
-            if name.endswith('.csv'):
-                df = pd.read_csv(file_input)
-            elif name.endswith(('.xlsx', '.xls')):
-                df = pd.read_excel(file_input, engine='openpyxl')
-            elif name.endswith('.json'):
-                df = pd.read_json(file_input)
+        if isinstance(data_source, pd.DataFrame):
+            # Already a DataFrame, make a copy
+            df = data_source.copy()
+        elif hasattr(data_source, 'read'):
+            # File upload
+            file_extension = data_source.name.split('.')[-1].lower()
+
+            if file_extension == 'csv':
+                df = pd.read_csv(data_source)
+            elif file_extension in ['xls', 'xlsx']:
+                df = pd.read_excel(data_source)
+            elif file_extension == 'json':
+                df = pd.read_json(data_source)
             else:
-                st.sidebar.error("Unsupported file format. Please use CSV, XLSX, or JSON.")
-                return None
-            if df is not None: original_columns = list(df.columns)
-        elif isinstance(file_input, str):  # Handle URL fetched string data
-            st.sidebar.info("Processing data from URL or text string...")
-            df = pd.read_csv(StringIO(file_input))  # Assuming URL content is CSV
-            if df is not None: original_columns = list(df.columns)
+                raise ValueError(f"Unsupported file format: {file_extension}")
+        elif isinstance(data_source, str):
+            # String data (probably from URL)
+            df = pd.read_csv(StringIO(data_source))
         else:
-            st.sidebar.error(f"Invalid input type for parsing: {type(file_input)}")
-            return None
-
-        if df is None:
-            st.sidebar.error("Failed to read data.")
-            return None
-        if df.empty:
-            st.sidebar.warning("The uploaded file is empty or could not be parsed into data.")
-            return df
-
-        # Debugging information
-        st.sidebar.info(f"Original DataFrame shape: {df.shape}")
-        st.sidebar.info(f"Original columns: {', '.join(original_columns)}")
-
-        # Clean and standardize column names
-        df.columns = df.columns.str.strip().str.replace(' ', '_', regex=False).str.replace('[^A-Za-z0-9_]+', '',
-                                                                                           regex=True)
-        df.columns = [f"col_{i}" if c == "" else c for i, c in enumerate(df.columns)]  # Handle empty names
-        standardized_columns = list(df.columns)
-
-        # Store the mapping between standardized and original column names
-        if SESSION_COLUMN_MAPPING not in st.session_state:
-            st.session_state[SESSION_COLUMN_MAPPING] = {}
-
-        # Update the mapping with new columns
-        for std, orig in zip(standardized_columns, original_columns):
-            st.session_state[SESSION_COLUMN_MAPPING][std] = orig
-
-        # Define expected columns and their types/handling
-        date_cols = ['Last_Transaction_Date']
-        string_cols_require_str = ["Account_ID", "Account_Type", "Account_Status", "Email_Contact_Attempt",
-                                   "SMS_Contact_Attempt", "Phone_Call_Attempt", "KYC_Status", "Branch"]
-
-        # Ensure expected columns exist, add if missing with default value 'Unknown' or NaT for date
-        for col in date_cols:
-            if col not in df.columns:
-                df[col] = pd.NaT
-                st.sidebar.warning(f"Missing expected column '{col}'. Added with missing values.")
-        for col in string_cols_require_str:
-            if col not in df.columns:
-                df[col] = 'Unknown'
-                st.sidebar.warning(f"Missing expected column '{col}'. Added with 'Unknown' values.")
-
-        # Type conversion and cleaning for expected columns
-        for col in date_cols:
-            if col in df.columns:  # Check again after potentially adding
-                # Show the unique values before conversion for debugging
-                if not df[col].empty:
-                    unique_vals = df[col].dropna().unique()
-                    if len(unique_vals) > 0:
-                        st.sidebar.info(f"Sample dates before conversion ({col}): {unique_vals[:3]}")
-
-                # Attempt robust date conversion with multiple formats
-                try:
-                    # First try standard conversion with error coercing
-                    df[col] = pd.to_datetime(df[col], errors='coerce')
-
-                    # Check if we got too many NaT values (>50%)
-                    if df[col].isna().mean() > 0.5:
-                        st.sidebar.warning(
-                            f"Over 50% of dates in '{col}' couldn't be parsed. Trying alternative formats...")
-
-                        # Save a copy of the original column
-                        orig_dates = df[col].copy()
-
-                        # Try common date formats explicitly
-                        formats = ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d',
-                                   '%d-%m-%Y', '%m-%d-%Y', '%Y.%m.%d', '%d.%m.%Y']
-
-                        for fmt in formats:
-                            try:
-                                df[col] = pd.to_datetime(orig_dates, format=fmt, errors='coerce')
-                                # If this format worked well (less than 25% NaT), use it
-                                if df[col].isna().mean() < 0.25:
-                                    st.sidebar.info(f"Successfully parsed dates using format: {fmt}")
-                                    break
-                            except:
-                                continue
-                except Exception as e:
-                    st.sidebar.error(f"Error converting dates in column '{col}': {e}")
-                    # Ensure column exists even if conversion failed
-                    df[col] = pd.NaT
-
-        for col in string_cols_require_str:
-            if col in df.columns:  # Check again after potentially adding
-                # Ensure string type and fill NaNs, strip whitespace
-                try:
-                    df[col] = df[col].astype(str).fillna('Unknown').str.strip()
-                    # Replace common 'no data' indicators with 'Unknown'
-                    df[col] = df[col].replace(['nan', 'None', '', 'Null', 'NULL', 'null'], 'Unknown', regex=True)
-                except Exception as e:
-                    st.sidebar.error(f"Error standardizing column '{col}': {e}")
-                    # Ensure column exists with default value
-                    df[col] = 'Unknown'
-
-        # Final validation check
-        if df is None or df.empty:
-            st.sidebar.error("Data processing resulted in empty DataFrame. Check input data.")
-            return None
-
-        st.sidebar.success(f"✅ Data parsed and standardized successfully! Shape: {df.shape}")
-        return df
+            raise ValueError(f"Unsupported data source type: {type(data_source)}")
     except Exception as e:
-        st.sidebar.error(f"Error during data parsing/standardization: {e}")
-        st.sidebar.error(f"Original columns detected: {original_columns if original_columns else 'N/A'}")
-        st.sidebar.error(f"Traceback: {traceback.format_exc()}")
-        return None
+        st.error(f"Error parsing data: {str(e)}")
+        raise e
+
+    # Ensure essential columns exist
+    required_columns = [
+        "Account_ID", "Customer_ID", "Account_Type",
+        "Date_Last_Cust_Initiated_Activity", "Expected_Account_Dormant"
+    ]
+
+    # Check if required columns exist (case-insensitive)
+    df_columns_lower = [col.lower() for col in df.columns]
+    column_mapping = {}
+
+    # Map columns by case-insensitive matching
+    for req_col in required_columns:
+        req_col_lower = req_col.lower()
+        found = False
+
+        for i, col in enumerate(df_columns_lower):
+            if col == req_col_lower:
+                # Found a match, use the original case from the uploaded data
+                orig_col = df.columns[i]
+                if orig_col != req_col:
+                    # Rename only if different
+                    column_mapping[orig_col] = req_col
+                found = True
+                break
+
+        if not found:
+            # Add missing required column with default values
+            st.warning(f"Required column '{req_col}' not found. Adding with default values.")
+            if req_col == "Account_ID":
+                df[req_col] = [f"ACC{i + 1000}" for i in range(len(df))]
+            elif req_col == "Customer_ID":
+                df[req_col] = [f"CUST{i + 1000}" for i in range(len(df))]
+            elif req_col == "Account_Type":
+                df[req_col] = "Unknown"
+            elif req_col == "Date_Last_Cust_Initiated_Activity":
+                df[req_col] = datetime.now().strftime("%Y-%m-%d")
+            elif req_col == "Expected_Account_Dormant":
+                df[req_col] = "No"
+
+    # Rename columns based on mapping
+    if column_mapping:
+        df = df.rename(columns=column_mapping)
+
+    # Ensure date columns are properly formatted
+    date_columns = [
+        "Date_Last_Cust_Initiated_Activity",
+        "Account_Open_Date",
+        "Last_Communication_Date"
+    ]
+
+    for date_col in date_columns:
+        if date_col in df.columns:
+            try:
+                df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+                df[date_col] = df[date_col].dt.strftime('%Y-%m-%d')
+            except Exception as e:
+                st.warning(f"Could not convert {date_col} to date format. Error: {e}")
+
+    # Standardize yes/no fields
+    boolean_columns = [
+        "Expected_Account_Dormant",
+        "Has_Address",
+        "Has_Active_Accounts"
+    ]
+
+    for bool_col in boolean_columns:
+        if bool_col in df.columns:
+            # Convert to string first
+            df[bool_col] = df[bool_col].astype(str).str.lower()
+            # Standardize to Yes/No
+            df[bool_col] = df[bool_col].apply(
+                lambda x: "Yes" if x.lower() in ["yes", "y", "true", "1", "t"] else
+                ("No" if x.lower() in ["no", "n", "false", "0", "f"] else x)
+            )
+
+    # Store original column names for display purposes
+    st.session_state[SESSION_COLUMN_MAPPING] = {col: col for col in df.columns}
+
+    # Log the parsing results
+    st.sidebar.info(f"Processed {len(df)} rows with {len(df.columns)} columns")
+
+    return df

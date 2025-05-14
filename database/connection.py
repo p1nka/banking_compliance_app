@@ -3,15 +3,81 @@ import pyodbc
 import streamlit as st
 import time
 import re
+from datetime import datetime
 from config import DB_SERVER, DB_NAME, DB_PORT
 
-@st.cache_resource(ttl="1h")  # Cache connection for 1 hour
+# Global connection pool to reuse connections
+CONNECTION_POOL = {}
+LAST_ACTIVITY = {}
+CONNECTION_TIMEOUT = 3600  # 1 hour timeout for connections
+CONNECTION_KEEPALIVE = 300  # 5 minutes keepalive ping
+
+
+@st.cache_resource(ttl="1h")
 def get_db_connection():
     """
     Creates and returns a connection to the Azure SQL database using the credentials
     in st.secrets or environment variables, and global DB_SERVER/DB_NAME.
     Returns None if connection fails or credentials are not found.
+
+    This function is cached by Streamlit for 1 hour to avoid excessive connection creation.
     """
+    # Generate a unique connection key
+    conn_key = f"{DB_SERVER}_{DB_NAME}_{DB_PORT}"
+
+    # Check if a valid connection exists in the pool
+    if conn_key in CONNECTION_POOL and CONNECTION_POOL[conn_key] is not None:
+        # Check if the connection is still active
+        try:
+            # Check if connection has been inactive too long
+            if conn_key in LAST_ACTIVITY:
+                elapsed = (datetime.now() - LAST_ACTIVITY[conn_key]).total_seconds()
+                if elapsed > CONNECTION_TIMEOUT:
+                    # Close old connection and create a new one
+                    try:
+                        CONNECTION_POOL[conn_key].close()
+                    except:
+                        pass
+                    CONNECTION_POOL[conn_key] = None
+                    st.sidebar.info(f"Database connection timeout ({elapsed:.0f}s). Reconnecting...")
+                elif elapsed > CONNECTION_KEEPALIVE:
+                    # Send a keepalive ping
+                    try:
+                        cursor = CONNECTION_POOL[conn_key].cursor()
+                        cursor.execute("SELECT 1")
+                        cursor.fetchone()
+                        cursor.close()
+                        LAST_ACTIVITY[conn_key] = datetime.now()
+                        st.sidebar.info("Database connection refreshed.")
+                    except:
+                        # Connection is stale, will create a new one
+                        try:
+                            CONNECTION_POOL[conn_key].close()
+                        except:
+                            pass
+                        CONNECTION_POOL[conn_key] = None
+                        st.sidebar.warning("Database connection became stale. Reconnecting...")
+
+            # If the connection is still valid, return it
+            if CONNECTION_POOL[conn_key] is not None:
+                # Verify connection is still working
+                cursor = CONNECTION_POOL[conn_key].cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+                cursor.close()
+
+                # Update last activity timestamp
+                LAST_ACTIVITY[conn_key] = datetime.now()
+                return CONNECTION_POOL[conn_key]
+        except Exception:
+            # Connection is invalid, close it and create a new one
+            try:
+                CONNECTION_POOL[conn_key].close()
+            except:
+                pass
+            CONNECTION_POOL[conn_key] = None
+
+    # If we get here, we need to create a new connection
     db_username = None
     db_password = None
     use_entra = False
@@ -24,12 +90,12 @@ def get_db_connection():
         try:
             db_username = st.secrets.get("DB_USERNAME")
             db_password = st.secrets.get("DB_PASSWORD")
+            db_server = st.secrets.get("DB_SERVER_NAME", DB_SERVER)
+            db_name = st.secrets.get("DB_NAME", DB_NAME)
+            db_port = st.secrets.get("DB_PORT", DB_PORT)
             use_entra_str = st.secrets.get("USE_ENTRA_AUTH", "false")
             use_entra = use_entra_str.lower() == "true"
-            if use_entra:
-                 entra_domain = st.secrets.get("ENTRA_DOMAIN")
-                 if not entra_domain:
-                      st.warning("USE_ENTRA_AUTH is true, but ENTRA_DOMAIN is missing in secrets.toml.")
+            entra_domain = st.secrets.get("ENTRA_DOMAIN")
         except Exception as e:
             st.warning(f"Could not read DB secrets: {e}. Trying environment variables.")
 
@@ -37,13 +103,12 @@ def get_db_connection():
     if db_username is None or db_password is None:
         db_username = os.getenv("DB_USERNAME")
         db_password = os.getenv("DB_PASSWORD")
-        if not use_entra:  # Only check env var for Entra if not already set by secrets
-            use_entra_str = os.getenv("USE_ENTRA_AUTH", "false")
-            use_entra = use_entra_str.lower() == "true"
-            if use_entra:
-                 entra_domain = os.getenv("ENTRA_DOMAIN")
-                 if not entra_domain:
-                      st.warning("USE_ENTRA_AUTH env var is true, but ENTRA_DOMAIN env var is missing.")
+        db_server = os.getenv("DB_SERVER_NAME", DB_SERVER)
+        db_name = os.getenv("DB_NAME", DB_NAME)
+        db_port = os.getenv("DB_PORT", DB_PORT)
+        use_entra_str = os.getenv("USE_ENTRA_AUTH", "false")
+        use_entra = use_entra_str.lower() == "true"
+        entra_domain = os.getenv("ENTRA_DOMAIN")
 
     if not db_username or not db_password:
         st.error(
@@ -58,280 +123,135 @@ def get_db_connection():
 
     conn_str = ""
     try:
+        # Determine if we should use SQL or Entra authentication
         if use_entra:
             if not entra_domain:
-                 st.error("Microsoft Entra Authentication requires ENTRA_DOMAIN.")
-                 return None
+                st.error("Entra authentication enabled but ENTRA_DOMAIN not set")
+                return None
+
             conn_str = (
-                f"DRIVER={{ODBC Driver 18 for SQL Server}};"  # Try newer driver first
-                f"SERVER={DB_SERVER};" 
-                f"DATABASE={DB_NAME};"
+                f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+                f"SERVER={db_server},{db_port};"
+                f"DATABASE={db_name};"
                 f"Authentication=ActiveDirectoryPassword;"
                 f"UID={db_username}@{entra_domain};"
                 f"PWD={db_password};"
                 f"Encrypt=yes;TrustServerCertificate=no;Connection Timeout=120;"
             )
-            st.sidebar.caption("Attempting Entra Auth")
+            st.sidebar.caption(f"Attempting Entra Auth to {db_server},{db_port}")
         else:
-             # First attempt with numeric port in SERVER parameter
-             conn_str = (
-                f"DRIVER={{ODBC Driver 18 for SQL Server}};"  # Try newer driver first
-                f"SERVER={DB_SERVER},{DB_PORT};" 
-                f"DATABASE={DB_NAME};"
+            # Default to SQL Authentication
+            conn_str = (
+                f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+                f"SERVER={db_server},{db_port};"
+                f"DATABASE={db_name};"
                 f"UID={db_username};"
                 f"PWD={db_password};"
                 f"Encrypt=yes;TrustServerCertificate=no;Connection Timeout=120;"
-             )
-             st.sidebar.caption(f"Attempting SQL Auth to {DB_SERVER},{DB_PORT}")
+            )
+            st.sidebar.caption(f"Attempting SQL Auth to {db_server},{db_port}")
 
         try:
+            # Sleep briefly before connection to avoid rapid retry issues
+            time.sleep(1)
             connection = pyodbc.connect(conn_str)
-            st.sidebar.success("✅ Connected to default database.")
+            st.sidebar.success("✅ Connected to Azure SQL database.")
+
+            # Store in connection pool and update activity timestamp
+            CONNECTION_POOL[conn_key] = connection
+            LAST_ACTIVITY[conn_key] = datetime.now()
+
             return connection
         except pyodbc.Error as e:
             # If first attempt fails, try with older driver
             if "ODBC Driver 18 for SQL Server" in conn_str:
                 st.sidebar.warning("Driver 18 failed, trying Driver 17...")
                 conn_str = conn_str.replace("ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server")
+
+                # Sleep briefly before retry
+                time.sleep(1)
                 connection = pyodbc.connect(conn_str)
-                st.sidebar.success("✅ Connected to default database with ODBC Driver 17.")
-                return connection
-            # If still failing, try without port specification
-            elif "," in conn_str and not use_entra:
-                st.sidebar.warning("Connection with port failed, trying without port...")
-                conn_str = (
-                    f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-                    f"SERVER={DB_SERVER};"  # Without port
-                    f"DATABASE={DB_NAME};"
-                    f"UID={db_username};"
-                    f"PWD={db_password};"
-                    f"Encrypt=yes;TrustServerCertificate=no;Connection Timeout=120;"
-                )
-                connection = pyodbc.connect(conn_str)
-                st.sidebar.success("✅ Connected to default database without port specification.")
+                st.sidebar.success("✅ Connected to Azure SQL database with ODBC Driver 17.")
+
+                # Store in connection pool and update activity timestamp
+                CONNECTION_POOL[conn_key] = connection
+                LAST_ACTIVITY[conn_key] = datetime.now()
+
                 return connection
             else:
                 raise e  # Re-raise the exception if all connection attempts failed
 
     except pyodbc.Error as e:
-        st.sidebar.error(f"Default Database Connection Error: {e}")
-        # More specific error message based on error code
+        st.sidebar.error(f"Database Connection Error: {e}")
         if "08001" in str(e):
             st.sidebar.warning("Cannot reach the server. Check server name, firewall rules, and network connection.")
         elif "28000" in str(e):
             st.sidebar.warning("Login failed. Check username and password.")
         elif "42000" in str(e):
             st.sidebar.warning("Database access error. Check if the database exists and user has permission.")
-        elif "01000" in str(e) and "TLS" in str(e):
-            st.sidebar.warning("SSL/TLS error. Try setting TrustServerCertificate=yes in connection string.")
         else:
             st.sidebar.warning("Please check DB credentials, server address, database name, and firewall rules.")
         return None
     except Exception as e:
-        st.sidebar.error(f"An unexpected error occurred during default DB connection: {e}")
+        st.sidebar.error(f"An unexpected error occurred during DB connection: {e}")
         return None
 
-def test_db_connection(connection_string, display_area="sidebar"):
+
+def close_all_connections():
     """
-    Tests a database connection string and returns diagnostic information.
-
-    Args:
-        connection_string: The connection string to test (password will be masked in output)
-        display_area: Where to display messages ("sidebar" or "main")
-
-    Returns:
-        True if connection succeeded, False otherwise
+    Closes all database connections in the pool.
+    This function should be called when the application is shutting down.
     """
-    # Mask the password in the connection string for display
-    masked_conn_str = re.sub(r"PWD=[^;]*", "PWD=*****", connection_string)
+    for conn_key, conn in CONNECTION_POOL.items():
+        if conn is not None:
+            try:
+                conn.close()
+                st.sidebar.info(f"Closed database connection: {conn_key}")
+            except Exception as e:
+                st.sidebar.warning(f"Error closing connection {conn_key}: {e}")
 
-    display_func = st.sidebar if display_area == "sidebar" else st
+    # Clear the pool
+    CONNECTION_POOL.clear()
+    LAST_ACTIVITY.clear()
 
-    try:
-        display_func.info(f"Testing connection with: {masked_conn_str}")
-        start_time = time.time()
-        connection = pyodbc.connect(connection_string, timeout=30)
-        end_time = time.time()
 
-        # Test if we can actually execute a simple query
-        cursor = connection.cursor()
-        cursor.execute("SELECT 1")
-        cursor.fetchall()
-        cursor.close()
-
-        connection.close()
-
-        display_func.success(f"✅ Connection successful! Time: {end_time - start_time:.2f}s")
-        return True
-    except pyodbc.Error as e:
-        display_func.error(f"❌ Connection failed: {e}")
-
-        # Provide specific guidance based on error codes
-        error_str = str(e)
-        if "08001" in error_str:
-            display_func.warning("Cannot reach the server. Check server name and firewall rules.")
-        elif "28000" in error_str or "18456" in error_str:
-            display_func.warning("Authentication failed. Check username and password.")
-        elif "42000" in error_str:
-            display_func.warning("Database access error. Check database name and permissions.")
-        elif "01000" in error_str and ("TLS" in error_str or "SSL" in error_str):
-            display_func.warning("SSL/TLS error. Try using TrustServerCertificate=yes.")
-        elif "IM002" in error_str:
-            display_func.warning("Driver not found. Check ODBC driver installation.")
-
-        return False
-    except Exception as e:
-        display_func.error(f"❌ Unexpected error: {e}")
-        return False
-
-def debug_db_connection(server, database, username, password, use_entra=False, entra_domain=None):
+def ping_connections():
     """
-    Provides a comprehensive diagnostic of database connection issues by testing multiple
-    connection string variations and driver options.
-
-    Returns a dict with test results and recommendations.
+    Sends a keep-alive ping to all connections in the pool.
+    This function can be called periodically to prevent connections from timing out.
     """
-    results = {
-        "success": False,
-        "successful_conn_str": None,
-        "tested_variations": [],
-        "recommendation": ""
-    }
-
-    # Test different ODBC driver versions
-    drivers_to_try = [
-        "ODBC Driver 18 for SQL Server",
-        "ODBC Driver 17 for SQL Server",
-        "SQL Server Native Client 11.0",
-        "SQL Server"  # Basic fallback
-    ]
-
-    # Test with and without port specification
-    server_variations = [
-        (f"{server},{DB_PORT}", "with port"),
-        (server, "without port")
-    ]
-
-    # Test with and without TrustServerCertificate
-    trust_cert_variations = [
-        ("no", "with certificate validation"),
-        ("yes", "without certificate validation")
-    ]
-
-    for driver in drivers_to_try:
-        for server_var, server_desc in server_variations:
-            for trust_cert, trust_desc in trust_cert_variations:
-                if use_entra:
-                    if not entra_domain:
-                        continue
-                    conn_str = (
-                        f"DRIVER={{{driver}}};"
-                        f"SERVER={server_var};"
-                        f"DATABASE={database};"
-                        f"Authentication=ActiveDirectoryPassword;"
-                        f"UID={username}@{entra_domain};"
-                        f"PWD={password};"
-                        f"Encrypt=yes;TrustServerCertificate={trust_cert};Connection Timeout=30;"
-                    )
-                    test_desc = f"Entra Auth with {driver}, {server_desc}, {trust_desc}"
-                else:
-                    conn_str = (
-                        f"DRIVER={{{driver}}};"
-                        f"SERVER={server_var};"
-                        f"DATABASE={database};"
-                        f"UID={username};"
-                        f"PWD={password};"
-                        f"Encrypt=yes;TrustServerCertificate={trust_cert};Connection Timeout=30;"
-                    )
-                    test_desc = f"SQL Auth with {driver}, {server_desc}, {trust_desc}"
-
-                # Test this variation
+    for conn_key, conn in CONNECTION_POOL.items():
+        if conn is not None:
+            try:
+                # Check if connection has been inactive too long
+                if conn_key in LAST_ACTIVITY:
+                    elapsed = (datetime.now() - LAST_ACTIVITY[conn_key]).total_seconds()
+                    if elapsed > CONNECTION_KEEPALIVE:
+                        # Send a keepalive ping
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT 1")
+                        cursor.fetchone()
+                        cursor.close()
+                        LAST_ACTIVITY[conn_key] = datetime.now()
+                        st.sidebar.info(f"Refreshed connection: {conn_key}")
+            except Exception as e:
+                st.sidebar.warning(f"Connection {conn_key} is stale: {e}")
+                # Mark for recreation on next use
                 try:
-                    st.sidebar.text(f"Testing: {test_desc}")
-                    start_time = time.time()
-                    connection = pyodbc.connect(conn_str, timeout=15)  # Short timeout for testing
-                    end_time = time.time()
+                    conn.close()
+                except:
+                    pass
+                CONNECTION_POOL[conn_key] = None
 
-                    # Try a simple query
-                    cursor = connection.cursor()
-                    cursor.execute("SELECT 1")
-                    cursor.fetchall()
-                    cursor.close()
 
-                    connection.close()
+# Register a Streamlit lifecycle handler to close connections when the app is done
+def on_shutdown():
+    """Close all connections when the app is shutting down."""
+    close_all_connections()
 
-                    results["tested_variations"].append({
-                        "description": test_desc,
-                        "success": True,
-                        "time": f"{end_time - start_time:.2f}s"
-                    })
 
-                    # If this is our first success, save it
-                    if not results["success"]:
-                        results["success"] = True
-                        results["successful_conn_str"] = conn_str
-                        results["recommendation"] = f"Use {test_desc}"
+# Register the handler if in main session
+if __name__ == "__main__":
+    import atexit
 
-                except Exception as e:
-                    results["tested_variations"].append({
-                        "description": test_desc,
-                        "success": False,
-                        "error": str(e)
-                    })
-
-    # If all tests failed, provide a comprehensive error analysis
-    if not results["success"]:
-        error_counts = {}
-        for test in results["tested_variations"]:
-            error_msg = test["error"]
-            if error_msg in error_counts:
-                error_counts[error_msg] += 1
-            else:
-                error_counts[error_msg] = 1
-
-        most_common_error = max(error_counts.items(), key=lambda x: x[1])
-        results["recommendation"] = analyze_db_error(most_common_error[0])
-
-    return results
-
-def analyze_db_error(error_msg):
-    """Analyzes a database error message and returns recommendations."""
-    if "08001" in error_msg:
-        return ("Cannot reach the server. Check:\n"
-                "1. Server name is correct\n"
-                "2. Azure firewall allows your IP\n"
-                "3. Network connectivity\n"
-                "4. VPN/proxy settings if applicable")
-    elif "28000" in error_msg or "18456" in error_msg:
-        return ("Authentication failed. Check:\n"
-                "1. Username and password are correct\n"
-                "2. User exists in the database\n"
-                "3. User has permission to access this database\n"
-                "4. For Entra auth, verify domain and permissions")
-    elif "42000" in error_msg:
-        return ("Database access error. Check:\n"
-                "1. Database name is correct\n"
-                "2. User has permission to access this database\n"
-                "3. Database exists on the server")
-    elif "01000" in error_msg and ("TLS" in error_msg or "SSL" in error_msg):
-        return ("SSL/TLS error. Try:\n"
-                "1. Setting TrustServerCertificate=yes\n"
-                "2. Updating your ODBC driver\n"
-                "3. Installing required certificates")
-    elif "IM002" in error_msg:
-        return ("ODBC driver not found. Check:\n"
-                "1. Install Microsoft ODBC Driver for SQL Server\n"
-                "2. Try different driver versions (17, 18)\n"
-                "3. Use SQL Server Native Client if available")
-    elif "HYT00" in error_msg:
-        return ("Connection timeout. Check:\n"
-                "1. Server is reachable\n"
-                "2. Increase connection timeout value\n"
-                "3. Network latency issues")
-    else:
-        return (f"Unrecognized error: {error_msg}\n"
-                "General recommendations:\n"
-                "1. Verify server, database, and credential information\n"
-                "2. Check firewall rules in Azure\n"
-                "3. Test connection from another tool (e.g., SSMS)\n"
-                "4. Check logs in Azure Portal")
+    atexit.register(on_shutdown)
