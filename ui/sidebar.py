@@ -496,6 +496,11 @@ def process_uploaded_data(uploaded_data_source):
     # Rerun to update the UI based on data_processed state
     st.rerun()
 
+report_date = st.date_input("Select Report Date (Dormancy)", st.session_state.get("report_date_for_dormancy", datetime.now().date()))
+st.session_state.report_date_for_dormancy = report_date
+
+agent_name = st.text_input("Agent Name (Compliance Logging)", st.session_state.get("agent_name_for_compliance", "SystemAuditor"))
+st.session_state.agent_name_for_compliance = agent_name
 
 def render_app_modes():
     """Render the application mode selector in the sidebar."""

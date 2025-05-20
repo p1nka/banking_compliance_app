@@ -62,7 +62,7 @@ SESSION_COLUMN_MAPPING = "column_mapping"    # Mapping of standardized to origin
 # Database configuration
 # Try to get from environment variables or use defaults
 DB_SERVER = os.environ.get("DB_SERVER", "agentdb123.database.windows.net")
-DB_NAME = os.environ.get("DB_NAME", "banking_compliance")
+DB_NAME = os.environ.get("DB_NAME", "compliance_db")
 DB_PORT = os.environ.get("DB_PORT", "1433")  # Default for SQL Server
 
 # Default threshold values (days)

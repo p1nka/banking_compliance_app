@@ -104,11 +104,31 @@ def parse_data(data_source):
                 st.warning(f"Could not convert {date_col} to date format. Error: {e}")
 
     # Standardize yes/no fields
-    boolean_columns = [
+    original_boolean_column_list = [
         "Expected_Account_Dormant",
         "Has_Address",
         "Has_Active_Accounts"
     ]
+    # In your data processing/standardization logic
+    if 'SDB_Charges_Outstanding' in df.columns:
+        def convert_sdb_charges(val):
+            s_val = str(val).lower()
+            if s_val in ["yes", "y", "true", "1", "t"]:
+                return 1.0  # Placeholder for "charges are outstanding"
+            elif s_val in ["no", "n", "false", "0", "f", "nan", ""]:
+                return 0.0
+            try:
+                return float(val)  # If it's already a number or numeric string
+            except ValueError:
+                return 0.0  # Default for unparseable, or could be np.nan then fillna
+
+        df['SDB_Charges_Outstanding'] = df['SDB_Charges_Outstanding'].apply(convert_sdb_charges)
+        # Ensure it's float type after conversion
+        df['SDB_Charges_Outstanding'] = pd.to_numeric(df['SDB_Charges_Outstanding'], errors='coerce').fillna(0.0)
+
+    # Then apply your general boolean standardization to other columns
+    # (excluding SDB_Charges_Outstanding if it's now numeric)
+    boolean_columns = [col for col in original_boolean_column_list if col != 'SDB_Charges_Outstanding']
 
     for bool_col in boolean_columns:
         if bool_col in df.columns:

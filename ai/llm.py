@@ -265,7 +265,70 @@ def generate_actions(llm, observation, trend):
     prompt = PromptTemplate.from_template(ACTION_PROMPT)
     inputs = {"observation": observation, "trend": trend}
     return _invoke_llm(llm, prompt, inputs)
+# Function to create a fallback response when LLM is not available
+def get_fallback_response(prompt_type, inputs=None):
+    """
+    Generate fallback responses when LLM is not available.
 
+    Args:
+        prompt_type (str): The type of prompt (summary, explanation, etc.)
+        inputs (dict, optional): Input parameters to customize the response
+
+    Returns:
+        str: A generic fallback response
+    """
+    if prompt_type == "dormant_summary":
+        return "AI summary not available. Please check your Groq API key configuration to enable AI features."
+
+    elif prompt_type == "compliance_summary":
+        return "AI compliance summary not available. Please check your Groq API key configuration to enable AI features."
+
+    elif prompt_type == "sql_generation":
+        return "SELECT * FROM accounts_data LIMIT 10; -- AI-generated SQL not available. This is a fallback query."
+
+    elif prompt_type == "sql_explanation":
+        return "SQL query explanation not available. Please check your Groq API key configuration to enable AI features."
+
+    elif prompt_type == "observation":
+        return "Data observation not available. AI features are disabled due to API configuration issues."
+
+    elif prompt_type == "trend":
+        return "Trend analysis not available. AI features are disabled due to API configuration issues."
+
+    elif prompt_type == "narration":
+        return "Executive summary not available. AI features are disabled due to API configuration issues."
+
+    elif prompt_type == "action":
+        return "Recommended actions not available. AI features are disabled due to API configuration issues."
+
+    else:
+        return "AI response not available. Please check your Groq API key configuration to enable AI features."
+
+
+# Define a clean_sql_query function that can be used across the application
+def clean_sql_query(sql_text):
+    """
+    Clean and extract valid SQL from raw text.
+
+    Args:
+        sql_text: Raw text that may contain SQL
+
+    Returns:
+        str: Cleaned SQL query
+    """
+    if not sql_text:
+        return None
+
+    # Remove markdown code blocks if present
+    sql_text = re.sub(r"^```sql\s*|\s*```$", "", sql_text, flags=re.MULTILINE).strip()
+
+    # Look for SELECT statement
+    match = re.search(r"SELECT.*", sql_text, re.IGNORECASE | re.DOTALL)
+    if match:
+        sql_query = match.group(0).strip()
+        return sql_query
+
+    return sql_text
 
 # --- Common prompts for different use cases ---
 # These remain the same as they define the instructions for the LLM
@@ -347,3 +410,59 @@ SQL Query:
 Use code with caution.
 Python
 Explanation:"""
+
+# Add the advanced SQL version of the prompt
+ADVANCED_SQL_GENERATION_PROMPT = """You are an expert Azure SQL query generator specializing in advanced T-SQL features. Given the database schema and a user question in natural language, generate *only* the valid T-SQL query that answers the question.
+Adhere strictly to the schema provided. Only use tables and columns exactly as they are named in the schema.
+The database is Azure SQL Server. Ensure the query syntax is correct for T-SQL.
+
+You specialize in generating complex SQL with:
+- JOINs (INNER, LEFT, RIGHT, FULL) when appropriate
+- Window functions (ROW_NUMBER(), RANK(), DENSE_RANK(), LEAD(), LAG()) for analytical operations
+- Common Table Expressions (CTEs) using WITH clauses for complex multi-step logic
+- Subqueries and derived tables for complex operations
+- PIVOT operations for transforming data as needed
+- Advanced aggregation with GROUP BY and HAVING clauses
+- CASE statements for conditional logic
+- Pagination using TOP/OFFSET-FETCH
+- Temporal functions for date/time analysis
+
+Prioritize using the 'accounts_data' table for general account questions. Use 'dormant_flags' or 'sql_query_history' if the question is specifically about those logs.
+The user expects a query to *retrieve* data. Generate *only* SELECT statements. Do NOT generate INSERT, UPDATE, DELETE, CREATE, ALTER, or DROP statements, or any other SQL commands.
+Do NOT include any explanations, greetings, or markdown code block formatting (```sql```) around the query. Just output the plain SQL query text.
+If the question cannot be answered using *only* the provided schema and *only* a SELECT query, output a polite message stating that you cannot answer that query based on the schema.
+
+Database Schema (Azure SQL):
+{schema}
+
+User question: {question}
+
+T-SQL Query:"""
+
+SQL_EXPLANATION_PROMPT = """You are a data analyst explaining an SQL query. Provide a clear, concise explanation of what the following T-SQL query does, referencing the provided database schema.
+
+Database Schema:
+{schema}
+
+SQL Query:
+```sql
+{sql_query}
+Explanation:
+"""
+
+ADVANCED_SQL_EXPLANATION_PROMPT = """You are a senior data engineer explaining a complex SQL query. Provide a detailed, step-by-step explanation of what the following advanced T-SQL query does, referencing the provided database schema.
+Break down the query by its components:
+
+First identify and explain any CTEs or subqueries used
+Clearly explain any JOIN operations and their purpose
+Identify and explain any window functions (ROW_NUMBER, RANK, etc.)
+Describe any aggregations and GROUP BY logic
+Explain any CASE statements or conditional logic
+Note how the results are ordered, limited, or paginated
+
+Walk through the query execution flow so a SQL beginner could understand what's happening at each step.
+Database Schema:
+{schema}
+SQL Query:
+{sql_query}
+"""

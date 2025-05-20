@@ -1,271 +1,307 @@
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
+# Assuming your backend compliance.py is in an 'agents' directory
+from agents.compliance import (
+    run_all_compliance_checks,
+    detect_incomplete_contact,
+    detect_flag_candidates,
+    log_flag_instructions,  # Important for the flag candidates agent
+    detect_ledger_candidates,
+    detect_freeze_candidates,
+    detect_transfer_candidates_to_cb,  # Renamed from detect_transfer_candidates
+    detect_foreign_currency_conversion_needed,  # Renamed
+    detect_sdb_court_application_needed,  # Renamed from detect_safe_deposit_boxes
+    detect_unclaimed_payment_instruments_ledger,  # Renamed
+    detect_claim_processing_pending,  # Renamed from detect_claim_candidates
+    generate_annual_cbuae_report_summary,  # Renamed
+    check_record_retention_compliance  # Renamed
+)
+# Assuming these utility modules exist
+from data.exporters import download_pdf_button, download_csv_button
+from ai.llm import (
+    get_fallback_response,
+    COMPLIANCE_SUMMARY_PROMPT,
+    OBSERVATION_PROMPT,
+    TREND_PROMPT,
+    NARRATION_PROMPT,
+    ACTION_PROMPT
+)
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from config import SESSION_COLUMN_MAPPING
-from agents.compliance import (
-    detect_incomplete_contact, detect_flag_candidates,
-    detect_ledger_candidates, detect_freeze_candidates,
-    detect_transfer_candidates, log_flag_instructions,
-    run_all_compliance_checks
-)
-from data.exporters import download_pdf_button, download_csv_button
-from ai.llm import COMPLIANCE_SUMMARY_PROMPT, load_llm
 
-# For backward compatibility - if your code references load_llm elsewhere
-load_llm = load_llm
+# from database.operations import save_summary_to_db # If you intend to save insights
 
-
-def render_compliance_analyzer(df, llm):
+# --- Main Rendering Function for Compliance UI ---
+def render_compliance_analyzer(df, agent_name_input, llm):
     """
-    Render the Compliance Analyzer UI.
-
-    Args:
-        df (pandas.DataFrame): The account data to analyze
-        llm: The LLM model for generating insights
+    Main function to render the Compliance Audit Analyzer UI.
     """
-    st.subheader("🔒 Compliance Analysis Tasks")
+    st.header("🛡️ Compliance Audit Analyzer (CBUAE)")
 
     agent_options_compliance = [
-        "📊 Summarized Compliance Detection",
-        "📨 Contact Attempt Verification Agent",
-        "🚩 Flag Dormant Candidate Agent",
-        "📘 Dormant Ledger Review Agent",
-        "❄️ Account Freeze Candidate Agent",
-        "🏦 CBUAE Transfer Candidate Agent"
+        "📊 Summarized Compliance Audit (All Checks)",
+        "--- Individual Agent Checks ---",
+        "CONTACT: Incomplete Contact Attempts",
+        "FLAG: Flag Candidates (Not Yet Flagged)",
+        "LEDGER: Internal Ledger Candidates (Art. 3.5)",
+        "FREEZE: Statement Freeze Needed (Art. 7.3)",
+        "CB_TRANSFER: CBUAE Transfer Candidates (Art. 8)",
+        "FX_CONV: Foreign Currency Conversion for CB Transfer",
+        "SDB_APP: SDB Court Application Needed",
+        "PI_LEDGER: Unclaimed Instruments for Internal Ledger",
+        "CLAIMS: Claims Processing Pending (>1 Month)",
+        "ANNUAL_RPT: Annual CBUAE Report Summary",
+        "RETENTION: Record Retention Compliance"
     ]
 
     selected_agent_compliance = st.selectbox(
-        "Select Compliance Task or Summary",
+        "Select Compliance Audit Task",
         agent_options_compliance,
-        key="compliance_agent_selector"
+        key="compliance_agent_selector_ui"
     )
 
-    # Get threshold dates from session state
-    general_threshold_date = st.session_state.get('general_threshold_date')
-    freeze_threshold_date = st.session_state.get('freeze_threshold_date')
-    cbuae_cutoff_date = st.session_state.get('cbuae_cutoff_date')
-
-    # Check if thresholds are available
-    if not all([general_threshold_date, freeze_threshold_date]):
-        st.warning("Threshold dates not set. Please check sidebar settings.")
-        return
-
-    # Handle the summarized compliance option
-    if selected_agent_compliance == "📊 Summarized Compliance Detection":
-        render_summarized_compliance_analysis(df, general_threshold_date, freeze_threshold_date, cbuae_cutoff_date, llm)
-    else:
-        # Handle individual agent options
-        render_individual_compliance_agent(df, selected_agent_compliance, general_threshold_date, freeze_threshold_date,
-                                           cbuae_cutoff_date)
+    if selected_agent_compliance == "📊 Summarized Compliance Audit (All Checks)":
+        render_summarized_compliance_audit_view(df, agent_name_input, llm)
+    elif selected_agent_compliance != "--- Individual Agent Checks ---":
+        render_individual_compliance_agent_view(df, selected_agent_compliance, agent_name_input, llm)
 
 
-def render_summarized_compliance_analysis(df, general_threshold_date, freeze_threshold_date, cbuae_cutoff_date, llm):
-    """Render the summarized compliance analysis UI."""
-    st.subheader("📈 Summarized Compliance Detection Results")
+# --- Summarized View ---
+def render_summarized_compliance_audit_view(df, agent_name_input, llm):
+    st.subheader("📈 Summarized Compliance Audit Results")
 
-    if st.button("📊 Run Summarized Compliance Analysis", key="run_summary_compliance_button"):
-        with st.spinner("Running all compliance checks..."):
-            results = run_all_compliance_checks(df, general_threshold_date, freeze_threshold_date, cbuae_cutoff_date)
+    if st.button("🚀 Run Summarized Compliance Audit", key="run_summary_compliance_audit_button"):
+        with st.spinner("Running all compliance audit checks..."):
+            results = run_all_compliance_checks(df.copy(), agent_name=agent_name_input)
+        st.session_state.compliance_summary_results_ui = results
+        st.toast("Summarized compliance audit complete!", icon="✅")
 
-        # Store results in session state for later reference
-        st.session_state.compliance_summary_results = results
+    if 'compliance_summary_results_ui' in st.session_state:
+        results = st.session_state.compliance_summary_results_ui
 
-        # Display the numerical summary
-        st.subheader("🔢 Numerical Summary")
+        st.markdown(f"**Total Accounts Processed:** `{results.get('total_accounts_processed', 'N/A')}`")
 
-        # Format days for display
-        general_days = (datetime.now() - general_threshold_date).days
-        freeze_days = (datetime.now() - freeze_threshold_date).days
-        cbuae_date_str = cbuae_cutoff_date.strftime('%Y-%m-%d') if cbuae_cutoff_date else "Invalid date"
+        flag_log_status = results.get("flag_logging_status", {})
+        if flag_log_status.get("status"):
+            st.success(f"Flagging Log: {flag_log_status.get('message', 'Logged.')}")
+        else:
+            st.warning(f"Flagging Log: {flag_log_status.get('message', 'Not logged or issue.')}")
 
-        st.metric(
-            "Incomplete Contact Attempts",
-            results['contact']['count'],
-            help=results['contact']['desc']
-        )
-        st.metric(
-            f"Flag Candidates (>={general_days} days inactive)",
-            results['flag']['count'],
-            help=results['flag']['desc']
-        )
-        st.metric(
-            "Ledger Classification Needed",
-            results['ledger']['count'],
-            help=results['ledger']['desc']
-        )
-        st.metric(
-            f"Freeze Candidates (>={freeze_days} days dormant)",
-            results['freeze']['count'],
-            help=results['freeze']['desc']
-        )
-        st.metric(
-            f"CBUAE Transfer Candidates (Inactive before {cbuae_date_str})",
-            results['transfer']['count'],
-            help=results['transfer']['desc']
-        )
+        st.subheader("Key Compliance Metrics")
+        # Display metrics in columns
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Incomplete Contact", results.get('incomplete_contact', {}).get('count', 0),
+                    help=results.get('incomplete_contact', {}).get('desc', ""))
+        col1.metric("Flag Candidates", results.get('flag_candidates', {}).get('count', 0),
+                    help=results.get('flag_candidates', {}).get('desc', ""))
+        col2.metric("Internal Ledger Candidates", results.get('ledger_candidates_internal', {}).get('count', 0),
+                    help=results.get('ledger_candidates_internal', {}).get('desc', ""))
+        col2.metric("Statement Freeze Needed", results.get('statement_freeze_needed', {}).get('count', 0),
+                    help=results.get('statement_freeze_needed', {}).get('desc', ""))
+        col3.metric("CBUAE Transfer Candidates", results.get('transfer_candidates_cb', {}).get('count', 0),
+                    help=results.get('transfer_candidates_cb', {}).get('desc', ""))
+        col3.metric("Claims Pending (>1 Month)", results.get('claims_processing_pending', {}).get('count', 0),
+                    help=results.get('claims_processing_pending', {}).get('desc', ""))
 
-        # Prepare input text for AI summary
-        compliance_summary_input_text = (
-            f"Compliance Analysis Findings ({results['total_accounts']} total accounts analyzed):\n"
-            f"- {results['contact']['desc']}\n"
-            f"- {results['flag']['desc']}\n"
-            f"- {results['ledger']['desc']}\n"
-            f"- {results['freeze']['desc']}\n"
-            f"- {results['transfer']['desc']}"
-        )
+        # --- Chart for Summary ---
+        st.subheader("Visual Insights")
+        compliance_counts_data = {
+            "Incomplete Contact": results.get('incomplete_contact', {}).get('count', 0),
+            "Flag Candidates": results.get('flag_candidates', {}).get('count', 0),
+            "Ledger Internal": results.get('ledger_candidates_internal', {}).get('count', 0),
+            "Freeze Needed": results.get('statement_freeze_needed', {}).get('count', 0),
+            "CB Transfer": results.get('transfer_candidates_cb', {}).get('count', 0),
+            "Claims Pending": results.get('claims_processing_pending', {}).get('count', 0),
+        }
+        compliance_counts_df = pd.DataFrame(list(compliance_counts_data.items()),
+                                            columns=['Category', 'Count']).set_index('Category')
+        if not compliance_counts_df.empty:
+            st.bar_chart(compliance_counts_df, height=300)
+        else:
+            st.info("No data for compliance category chart.")
 
-        # Add AI narrative summary if LLM is available
-        st.subheader("📝 AI Compliance Summary")
-        narrative_summary = compliance_summary_input_text  # Default to raw text
+        summary_input_text = f"Compliance Audit Report (Total Processed: {results.get('total_accounts_processed')})\n"
+        for key, val_dict in results.items():
+            if isinstance(val_dict, dict) and "desc" in val_dict and "count" in val_dict:
+                if not val_dict["desc"].startswith("(Skipped"):
+                    summary_input_text += f"- {val_dict['desc']}\n"
+            elif key == "flag_logging_status":
+                summary_input_text += f"- Flagging Log: {val_dict.get('message')}\n"
+            elif key == "record_retention_check":
+                summary_input_text += f"- {val_dict.get('desc')}\n"
 
+        st.subheader("📝 AI Generated Summary & Insights")
         if llm:
             try:
-                with st.spinner("Generating AI Compliance Summary..."):
-                    compliance_summary_prompt_template = PromptTemplate.from_template(COMPLIANCE_SUMMARY_PROMPT)
-                    compliance_summary_chain = compliance_summary_prompt_template | llm | StrOutputParser()
-                    compliance_narrative_summary = compliance_summary_chain.invoke({
-                        "compliance_details": compliance_summary_input_text
-                    })
-                st.markdown(compliance_narrative_summary)
-                st.session_state.compliance_narrative_summary = compliance_narrative_summary  # Store for PDF
-            except Exception as llm_e:
-                st.error(f"AI compliance summary generation failed: {llm_e}")
-                fallback_summary = get_fallback_response("compliance_summary")
-                st.warning(fallback_summary)
-                st.text_area("Raw Compliance Findings:", compliance_summary_input_text, height=150)
-                st.session_state.compliance_narrative_summary = f"{fallback_summary}\n\nRaw Findings:\n{compliance_summary_input_text}"
+                with st.spinner("Generating AI summary for all compliance checks..."):
+                    prompt_template = PromptTemplate.from_template(COMPLIANCE_SUMMARY_PROMPT)
+                    chain = prompt_template | llm | StrOutputParser()
+                    ai_summary = chain.invoke({"compliance_details": summary_input_text})
+                st.markdown(ai_summary)
+                st.session_state.compliance_ai_summary_text_ui = ai_summary
+            except Exception as e:
+                st.error(f"AI summary generation failed: {e}")
+                st.session_state.compliance_ai_summary_text_ui = get_fallback_response(
+                    "compliance_summary") + f"\n\nRaw Data:\n{summary_input_text}"
+                st.warning(st.session_state.compliance_ai_summary_text_ui)
         else:
-            fallback_summary = get_fallback_response("compliance_summary")
-            st.warning(fallback_summary)
-            st.text_area("Raw Compliance Findings:", compliance_summary_input_text, height=150)
-            st.session_state.compliance_narrative_summary = f"{fallback_summary}\n\nRaw Findings:\n{compliance_summary_input_text}"
+            st.warning("LLM not available. Displaying raw findings.")
+            st.text_area("Raw Findings for Summary", summary_input_text, height=200)
+            st.session_state.compliance_ai_summary_text_ui = summary_input_text
 
-        # Export options
-        st.subheader("⬇️ Export Summary")
-
-        # Create report sections for PDF
-        sections = [
-            {
-                "title": "Numerical Summary",
-                "content": (
-                    f"- {results['contact']['desc']}\n"
-                    f"- {results['flag']['desc']}\n"
-                    f"- {results['ledger']['desc']}\n"
-                    f"- {results['freeze']['desc']}\n"
-                    f"- {results['transfer']['desc']}"
-                )
-            },
-            {
-                "title": "Narrative Summary (AI Generated or Raw Findings)",
-                "content": st.session_state.get('compliance_narrative_summary', "Summary not generated or AI failed.")
-            }
+        # --- Export Options for Summary ---
+        st.subheader("⬇️ Export Summarized Report")
+        summary_report_sections = [
+            {"title": "Compliance Audit Overview", "content": summary_input_text},
+            {"title": "AI Generated Summary",
+             "content": st.session_state.get("compliance_ai_summary_text_ui", "AI Summary not generated.")}
         ]
+        download_pdf_button("Compliance_Audit_Summary_Report", summary_report_sections, "compliance_summary_report.pdf")
 
-        # Add download button
-        download_pdf_button(
-            "Compliance Analysis Summary Report",
-            sections,
-            f"compliance_summary_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        )
+        with st.expander("View Raw Results for All Compliance Checks"):
+            st.json(results, expanded=False)
 
 
-def render_individual_compliance_agent(df, selected_agent_compliance, general_threshold_date, freeze_threshold_date,
-                                       cbuae_cutoff_date):
-    """Render the UI for an individual compliance agent."""
-    st.subheader(f"Agent Task Results: {selected_agent_compliance}")
-    data_filtered = pd.DataFrame()
-    agent_desc = "Select an agent above."
-    agent_executed = False
+# --- Individual Agent View ---
+def render_individual_compliance_agent_view(df, selected_agent_key, agent_name_input, llm):
+    st.subheader(f"🔍 Results for: {selected_agent_key}")
+    three_years_ago = datetime.now() - timedelta(days=3 * 365)  # For agents needing this
 
-    agent_mapping_compliance = {
-        "📨 Contact Attempt Verification Agent": detect_incomplete_contact,
-        "🚩 Flag Dormant Candidate Agent": detect_flag_candidates,
-        "📘 Dormant Ledger Review Agent": detect_ledger_candidates,
-        "❄️ Account Freeze Candidate Agent": detect_freeze_candidates,
-        "🏦 CBUAE Transfer Candidate Agent": detect_transfer_candidates
+    # Agent mapping (key from dropdown to function and description)
+    agent_functions_compliance = {
+        "CONTACT: Incomplete Contact Attempts": (detect_incomplete_contact,
+                                                 "Detects accounts with incomplete contact attempts (Art. 3.1)."),
+        "FLAG: Flag Candidates (Not Yet Flagged)": (detect_flag_candidates,
+                                                    "Detects accounts inactive over threshold, not yet flagged dormant (Art. 2)."),
+        "LEDGER: Internal Ledger Candidates (Art. 3.5)": (detect_ledger_candidates,
+                                                          "Detects accounts for internal 'dormant accounts ledger' (Art. 3.5)."),
+        "FREEZE: Statement Freeze Needed (Art. 7.3)": (detect_freeze_candidates,
+                                                       "Detects dormant accounts requiring statement suppression (Art. 7.3)."),
+        "CB_TRANSFER: CBUAE Transfer Candidates (Art. 8)": (detect_transfer_candidates_to_cb,
+                                                            "Detects dormant accounts/balances for CBUAE transfer (Art. 8)."),
+        "FX_CONV: Foreign Currency Conversion for CB Transfer": (detect_foreign_currency_conversion_needed,
+                                                                 "Detects foreign currency items for CBUAE transfer requiring AED conversion (Art. 8.5)."),
+        "SDB_APP: SDB Court Application Needed": (detect_sdb_court_application_needed,
+                                                  "Detects SDBs requiring court application (Art. 3.7)."),
+        "PI_LEDGER: Unclaimed Instruments for Internal Ledger": (detect_unclaimed_payment_instruments_ledger,
+                                                                 "Detects unclaimed payment instruments for internal ledger (Art. 3.6)."),
+        "CLAIMS: Claims Processing Pending (>1 Month)": (detect_claim_processing_pending,
+                                                         "Detects customer claims (>1 month old) pending processing (Art. 4)."),
+        "ANNUAL_RPT: Annual CBUAE Report Summary": (generate_annual_cbuae_report_summary,
+                                                    "Generates summary for CBUAE Annual Report (Art. 3.10)."),
+        "RETENTION: Record Retention Compliance": (check_record_retention_compliance,
+                                                   "Checks record retention compliance (Art. 3.9 related).")
     }
+    agent_func_tuple = agent_functions_compliance.get(selected_agent_key)
+    if not agent_func_tuple:
+        st.error(f"No function mapped for '{selected_agent_key}'. Please check UI configuration.")
+        return
 
-    if selected_agent_func := agent_mapping_compliance.get(selected_agent_compliance):
-        with st.spinner(f"Running {selected_agent_compliance}..."):
-            # Pass necessary args based on agent
-            if selected_agent_compliance == "🚩 Flag Dormant Candidate Agent":
-                data_filtered, count, agent_desc = selected_agent_func(df, general_threshold_date)
+    agent_func, default_desc = agent_func_tuple
+    data_filtered = pd.DataFrame()
+    count = 0
+    agent_run_desc = default_desc
+    compliant_df = pd.DataFrame()  # For retention check
 
-                # Store threshold days for logging
-                general_threshold_days = (datetime.now() - general_threshold_date).days
+    with st.spinner(f"Running {selected_agent_key}..."):
+        try:
+            # Call the specific agent function with appropriate arguments
+            if selected_agent_key == "FLAG: Flag Candidates (Not Yet Flagged)":
+                data_filtered, count, agent_run_desc = agent_func(df.copy(), three_years_ago)
+            elif selected_agent_key == "FREEZE: Statement Freeze Needed (Art. 7.3)":
+                data_filtered, count, agent_run_desc = agent_func(df.copy(), three_years_ago)
+            elif selected_agent_key == "RETENTION: Record Retention Compliance":
+                data_filtered, compliant_df, agent_run_desc = agent_func(
+                    df.copy())  # data_filtered is 'not_compliant_policy'
+                count = len(data_filtered)  # Count for "not compliant" part
+            else:  # Most functions just take df
+                data_filtered, count, agent_run_desc = agent_func(df.copy())
+            st.toast(f"{selected_agent_key} analysis complete!", icon="🔬")
+        except Exception as e:
+            st.error(f"Error running {selected_agent_key}: {e}")
+            st.exception(e)
+            return
 
-            elif selected_agent_compliance == "❄️ Account Freeze Candidate Agent":
-                data_filtered, count, agent_desc = selected_agent_func(df, freeze_threshold_date)
+    if selected_agent_key == "RETENTION: Record Retention Compliance":
+        st.metric(f"Items Potentially Non-Compliant (Policy) by {selected_agent_key}", count)
+        st.metric(f"Items Compliant/CBUAE Perpetual by {selected_agent_key}", len(compliant_df))
+    else:
+        st.metric(f"Items Identified by {selected_agent_key}", count)
+    st.caption(agent_run_desc)
 
-            elif selected_agent_compliance == "🏦 CBUAE Transfer Candidate Agent":
-                # Handle potential invalid date from sidebar input
-                if cbuae_cutoff_date is None:
-                    data_filtered, count, agent_desc = pd.DataFrame(), 0, "Skipped due to invalid CBUAE cutoff date format."
+    if not data_filtered.empty:
+        st.markdown(
+            f"**Top {min(5, len(data_filtered))} items for '{selected_agent_key.split(': ')[1]}':**")  # Use cleaner name
+        st.dataframe(data_filtered.head(min(5, len(data_filtered))), height=200, use_container_width=True)
+        download_csv_button(data_filtered,
+                            f"{selected_agent_key.replace(': ', '_').replace(' ', '_').lower()}_data.csv")
+
+        if selected_agent_key == "RETENTION: Record Retention Compliance" and not compliant_df.empty:
+            with st.expander("View Compliant / CBUAE Perpetual Records for Retention Check"):
+                st.dataframe(compliant_df.head(min(5, len(compliant_df))), height=200, use_container_width=True)
+                download_csv_button(compliant_df, f"retention_compliant_or_cb_data.csv")
+
+        # Special action for FLAG agent: Logging
+        if selected_agent_key == "FLAG: Flag Candidates (Not Yet Flagged)" and count > 0:
+            if st.button("Log Flagging Instructions to DB", key="log_flags_btn_compliance"):
+                threshold_days_for_log = (datetime.now() - three_years_ago).days
+                status, msg = log_flag_instructions(data_filtered, agent_name_input, threshold_days_for_log)
+                if status:
+                    st.success(msg)
                 else:
-                    data_filtered, count, agent_desc = selected_agent_func(df, cbuae_cutoff_date)
+                    st.error(msg)
 
-            else:  # "📨 Contact Attempt Verification Agent", "📘 Dormant Ledger Review Agent"
-                data_filtered, count, agent_desc = selected_agent_func(df)
+        # --- AI Insights for Individual Agent Data ---
+        st.subheader(f"🤖 AI Insights for {selected_agent_key}")
+        if llm:
+            sample_for_ai = data_filtered.sample(min(len(data_filtered), 10)).to_csv(index=False)
+            if st.button(f"Generate AI Insights for {selected_agent_key}", key=f"ai_btn_comp_{selected_agent_key}"):
+                with st.spinner("Generating AI insights..."):
+                    obs_prompt = PromptTemplate.from_template(OBSERVATION_PROMPT)
+                    obs_chain = obs_prompt | llm | StrOutputParser()
+                    observations = obs_chain.invoke({"data": sample_for_ai})
+                    st.session_state[f"comp_obs_{selected_agent_key}"] = observations
 
-            agent_executed = True
-            st.metric("Accounts Identified", count, help=agent_desc)
+                    trend_prompt = PromptTemplate.from_template(TREND_PROMPT)
+                    trend_chain = trend_prompt | llm | StrOutputParser()
+                    trends = trend_chain.invoke({"data": sample_for_ai})
+                    st.session_state[f"comp_trend_{selected_agent_key}"] = trends
 
-    if agent_executed:
-        if not data_filtered.empty:
-            st.success(f"{len(data_filtered)} accounts identified.")
-            if st.checkbox(f"View first 15 detected accounts for '{selected_agent_compliance}'",
-                           key=f"view_detected_{selected_agent_compliance.replace(' ', '_')}"):
-                # Display the DataFrame with original column names if available
-                display_df = data_filtered.head(15).copy()
-                if SESSION_COLUMN_MAPPING in st.session_state and st.session_state[SESSION_COLUMN_MAPPING]:
-                    try:
-                        # Create a display mapping that only includes columns present in the data
-                        display_columns_mapping = {
-                            std_col: st.session_state[SESSION_COLUMN_MAPPING].get(std_col, std_col)
-                            for std_col in display_df.columns
-                        }
-                        display_df.rename(columns=display_columns_mapping, inplace=True)
-                    except Exception as e:
-                        st.warning(f"Could not display original column names: {e}")
+                    narr_prompt = PromptTemplate.from_template(NARRATION_PROMPT)
+                    narr_chain = narr_prompt | llm | StrOutputParser()
+                    narration = narr_chain.invoke({"observation": observations, "trend": trends})
+                    st.session_state[f"comp_narr_{selected_agent_key}"] = narration
 
-                st.dataframe(display_df)
+                    act_prompt = PromptTemplate.from_template(ACTION_PROMPT)
+                    act_chain = act_prompt | llm | StrOutputParser()
+                    actions = act_chain.invoke({"observation": observations, "trend": trends})
+                    st.session_state[f"comp_act_{selected_agent_key}"] = actions
+                st.toast("AI insights generated!", icon="💡")
 
-            # Add buttons for next steps/logging based on agent type
-            if selected_agent_compliance == "🚩 Flag Dormant Candidate Agent":
-                if st.button("Log Flagging Instruction to DB (for Audit)", key="log_flag_instruction_compliance"):
-                    if 'Account_ID' not in data_filtered.columns:
-                        st.error("DataFrame does not have 'Account_ID' column. Cannot log.")
-                    else:
-                        try:
-                            flagged_ids = data_filtered['Account_ID'].tolist()
-                            success, message = log_flag_instructions(flagged_ids, selected_agent_compliance,
-                                                                     general_threshold_days)
+            if f"comp_narr_{selected_agent_key}" in st.session_state:
+                with st.expander("🔍 AI Observations", expanded=False):
+                    st.markdown(st.session_state[f"comp_obs_{selected_agent_key}"])
+                with st.expander("📈 AI Trend Analysis", expanded=False):
+                    st.markdown(st.session_state[f"comp_trend_{selected_agent_key}"])
+                with st.expander("📝 AI Narrative Summary", expanded=True):
+                    st.markdown(st.session_state[f"comp_narr_{selected_agent_key}"])
+                with st.expander("🚀 AI Recommended Actions", expanded=True):
+                    st.markdown(st.session_state[f"comp_act_{selected_agent_key}"])
 
-                            if success:
-                                st.success(message)
-                            else:
-                                st.error(message)
-                        except Exception as log_error:
-                            st.error(f"Error logging flag instructions: {log_error}")
-
-            # Add CSV export for all agent types
-            st.subheader("⬇️ Export Data")
-            download_csv_button(
-                data_filtered,
-                f"{selected_agent_compliance.replace(' ', '_').replace(':', '')}_accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            )
-
-            # Add specific guidance based on agent type
-            if selected_agent_compliance == "📘 Dormant Ledger Review Agent":
-                st.info("Review the accounts identified for manual classification in the dormant ledger.")
-
-            elif selected_agent_compliance in ["❄️ Account Freeze Candidate Agent", "🏦 CBUAE Transfer Candidate Agent"]:
-                action_type = "freeze" if "Freeze" in selected_agent_compliance else "transfer"
-                st.info(
-                    f"Accounts identified for potential {action_type} based on regulations. Review and take appropriate action according to your bank's policies.")
-
-        elif len(data_filtered) == 0:
-            st.info("No accounts matching the criteria were found.")
+                individual_report_sections = [
+                    {"title": f"Analysis Overview: {selected_agent_key}",
+                     "content": f"{count} items identified. Description: {agent_run_desc}"},
+                    {"title": "AI Observations", "content": st.session_state[f"comp_obs_{selected_agent_key}"]},
+                    {"title": "AI Trend Analysis", "content": st.session_state[f"comp_trend_{selected_agent_key}"]},
+                    {"title": "AI Narrative Summary", "content": st.session_state[f"comp_narr_{selected_agent_key}"]},
+                    {"title": "AI Recommended Actions", "content": st.session_state[f"comp_act_{selected_agent_key}"]},
+                ]
+                download_pdf_button(f"{selected_agent_key}_Report", individual_report_sections,
+                                    f"{selected_agent_key.replace(': ', '_').replace(' ', '_').lower()}_report.pdf")
+        else:
+            st.info("LLM not available for generating AI insights for individual checks.")
+    elif not (
+            selected_agent_key == "RETENTION: Record Retention Compliance" and not compliant_df.empty):  # Avoid "No items" if compliant_df has data
+        st.info(f"No items identified by {selected_agent_key} for this specific category (e.g., 'not compliant').")

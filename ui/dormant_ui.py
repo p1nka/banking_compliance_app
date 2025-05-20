@@ -1,655 +1,262 @@
 import streamlit as st
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 import pandas as pd
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-
-from config import SESSION_COLUMN_MAPPING
+# Assuming your backend dormant.py is in an 'agents' directory
 from agents.dormant import (
-    check_safe_deposit, check_investment_inactivity,
-    check_fixed_deposit_inactivity, check_general_inactivity,
-    check_unreachable_dormant, run_all_dormant_checks,
-    convert_foreign_currencies, prepare_central_bank_transfer
+    run_all_dormant_identification_checks, # Renamed from run_all_dormant_checks
+    check_safe_deposit_dormancy,           # Renamed from check_safe_deposit
+    check_investment_inactivity,
+    check_fixed_deposit_inactivity,
+    check_demand_deposit_inactivity,
+    check_unclaimed_payment_instruments,   # Renamed from check_bankers_cheques
+    check_eligible_for_cb_transfer,    # Renamed from check_transfer_to_central_bank
+    check_art3_process_needed,           # Renamed from check_art3_process_required
+    check_contact_attempts_needed,
+    check_high_value_dormant_accounts,   # Renamed from check_high_value_dormant
+    check_dormant_to_active_transitions # Renamed from check_dormant_to_active
 )
-from database.operations import save_summary_to_db
+# Assuming these utility modules exist as per your original code
+from database.pipeline import AgentDatabasePipeline # If needed for dormant_flags_history
 from data.exporters import download_pdf_button, download_csv_button
 from ai.llm import (
-
+    get_fallback_response,
     DORMANT_SUMMARY_PROMPT,
     OBSERVATION_PROMPT,
     TREND_PROMPT,
     NARRATION_PROMPT,
     ACTION_PROMPT
 )
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from database.operations import save_summary_to_db # If you intend to save insights
 
 
-def preprocess_dataset(df):
+# --- Main Rendering Function for Dormant UI ---
+def render_dormant_analyzer(df, report_date_str, llm, dormant_flags_history_df):
     """
-    Preprocess the dataset to ensure it has the required columns with proper formats.
-
-    Args:
-        df (pandas.DataFrame): The original dataset
-
-    Returns:
-        pandas.DataFrame: Processed dataset ready for dormant account analysis
+    Main function to render the Dormant Account Analyzer UI.
     """
-    processed_df = df.copy()
+    st.header("🇦🇪 Dormant Account Identification (CBUAE)")
 
-    # Create standardized column mappings based on your CSV structure
-    if 'Date_Last_Customer_Communication_Any_Type' in processed_df.columns:
-        processed_df['Last_Transaction_Date'] = processed_df['Date_Last_Customer_Communication_Any_Type']
-    elif 'Date_Last_Cust_Initiated_Activity' in processed_df.columns:
-        processed_df['Last_Transaction_Date'] = processed_df['Date_Last_Cust_Initiated_Activity']
-
-    # Map contact attempt columns
-    if 'Bank_Contact_Attempted_Post_Dormancy_Trigger' in processed_df.columns:
-        # Create Yes/No contact attempt columns needed by dormant.py functions
-        processed_df['Email_Contact_Attempt'] = processed_df['Bank_Contact_Attempted_Post_Dormancy_Trigger'].apply(
-            lambda x: 'Yes' if x == 'Yes' else 'No')
-        processed_df['SMS_Contact_Attempt'] = processed_df['Bank_Contact_Attempted_Post_Dormancy_Trigger'].apply(
-            lambda x: 'Yes' if x == 'Yes' else 'No')
-        processed_df['Phone_Call_Attempt'] = processed_df['Bank_Contact_Attempted_Post_Dormancy_Trigger'].apply(
-            lambda x: 'Yes' if x == 'Yes' else 'No')
-
-    # If there's a status column, map it to Account_Status
-    if 'Expected_Account_Dormant' in processed_df.columns:
-        processed_df['Account_Status'] = processed_df['Expected_Account_Dormant'].apply(
-            lambda x: 'dormant' if x == 'Yes' else 'active')
-
-    # Map balance for high-value detection
-    if 'Current_Balance' in processed_df.columns:
-        processed_df['Balance'] = processed_df['Current_Balance']
-    elif 'Unclaimed_Item_Amount' in processed_df.columns:
-        processed_df['Balance'] = processed_df['Unclaimed_Item_Amount']
-
-    # Convert date strings to datetime objects
-    date_columns = [
-        'Last_Transaction_Date',
-        'Date_Last_Customer_Communication_Any_Type',
-        'Date_Last_Cust_Initiated_Activity',
-        'Date_Last_Bank_Contact_Attempt',
-        'Account_Creation_Date'
+    agent_options_dormant = [
+        "📊 Summarized Dormancy Analysis (All Checks)",
+        "--- Individual Agent Checks ---",
+        "SDB: Safe Deposit Box Dormancy",
+        "INV: Investment Account Inactivity",
+        "FD: Fixed Deposit Inactivity",
+        "DD: Demand Deposit Inactivity",
+        "PI: Unclaimed Payment Instruments",
+        "CB: Eligible for CBUAE Transfer",
+        "ART3: Article 3 Process Needed",
+        "CON: Contact Attempts Needed (Proactive)",
+        "HV: High-Value Dormant Accounts (≥ AED 25k)",
+        "DA: Dormant-to-Active Transitions"
     ]
 
-    for col in date_columns:
-        if col in processed_df.columns:
-            try:
-                processed_df[col] = pd.to_datetime(processed_df[col], errors='coerce')
-            except Exception as e:
-                st.warning(f"Failed to convert {col} to datetime: {e}")
-
-    return processed_df
-
-
-def render_dormant_analyzer(df, llm):
-    """
-    Render the Dormant Account Analyzer UI.
-
-    Args:
-        df (pandas.DataFrame): The account data to analyze
-        llm: The LLM model for generating insights
-    """
-    st.subheader("🏦 Dormant Account Analysis")
-
-    # Preprocess dataset to ensure it has the required columns
-    processed_df = preprocess_dataset(df)
-
-    # Store processed DataFrame in session state
-    st.session_state.processed_df = processed_df
-
-    # Create both 3-year and 5-year thresholds
-    threshold_3y = datetime.now() - timedelta(days=3 * 365)  # 3 years inactivity threshold
-    threshold_5y = datetime.now() - timedelta(days=5 * 365)  # 5 years for Central Bank transfer
-
-    st.info(
-        "Analysis uses 3-year threshold for dormancy detection and 5-year threshold for Central Bank transfer eligibility.")
-
-    agent_option = st.selectbox(
-        "🧭 Choose Dormant Detection Agent",
-        [
-            "📊 Summarized Dormant Analysis",
-            "🔐 Safe Deposit Box Agent",
-            "💼 Investment Inactivity Agent",
-            "🏦 Fixed Deposit Agent",
-            "📉 3-Year General Inactivity Agent",
-            "📵 Unreachable + No Active Accounts Agent",
-            "🏛️ Central Bank Transfer Report"
-        ],
-        key="dormant_agent_selector"
+    selected_agent_dormant = st.selectbox(
+        "Select Dormancy Identification Task",
+        agent_options_dormant,
+        key="dormant_agent_selector_ui"
     )
 
-    # Handle the summarized dormant analysis option
-    if agent_option == "📊 Summarized Dormant Analysis":
-        render_summarized_dormant_analysis(processed_df, threshold_3y, threshold_5y, llm)
-    elif agent_option == "🏛️ Central Bank Transfer Report":
-        render_central_bank_transfer_report(processed_df, threshold_3y, threshold_5y, llm)
-    else:
-        # Handle individual agent options
-        render_individual_dormant_agent(processed_df, agent_option, threshold_3y, threshold_5y, llm)
+    if selected_agent_dormant == "📊 Summarized Dormancy Analysis (All Checks)":
+        render_summarized_dormant_analysis_view(df, report_date_str, llm, dormant_flags_history_df)
+    elif selected_agent_dormant != "--- Individual Agent Checks ---":
+        render_individual_dormant_agent_view(df, selected_agent_dormant, report_date_str, llm, dormant_flags_history_df)
+
+# --- Summarized View ---
+def render_summarized_dormant_analysis_view(df, report_date_str, llm, dormant_flags_history_df):
+    st.subheader("📈 Summarized Dormancy Identification Results")
+
+    if st.button("🚀 Run Summarized Dormancy Analysis", key="run_summary_dormant_analysis_button"):
+        with st.spinner("Running all dormancy identification checks..."):
+            results = run_all_dormant_identification_checks(
+                df.copy(),
+                report_date_str=report_date_str,
+                dormant_flags_history_df=dormant_flags_history_df
+            )
+        st.session_state.dormant_summary_results_ui = results
+        st.toast("Summarized dormancy analysis complete!", icon="✅")
+
+    if 'dormant_summary_results_ui' in st.session_state:
+        results = st.session_state.dormant_summary_results_ui
+        summary_kpis = results.get("summary_kpis", {})
+
+        st.markdown(f"**Report Date Used:** `{results.get('report_date_used', 'N/A')}` | **Total Accounts Analyzed:** `{results.get('total_accounts_analyzed', 'N/A')}`")
+
+        st.subheader("Key Performance Indicators (KPIs)")
+        cols_kpi = st.columns(3)
+        cols_kpi[0].metric("Total Accounts Flagged Dormant", summary_kpis.get("total_accounts_flagged_dormant", 0))
+        cols_kpi[1].metric("% Dormant of Total", f"{summary_kpis.get('percentage_dormant_of_total', 0):.2f}%")
+        cols_kpi[2].metric("Total Dormant Balance (AED)", f"{summary_kpis.get('total_dormant_balance_aed', 0):,.2f}" if isinstance(summary_kpis.get('total_dormant_balance_aed'), (int, float)) else summary_kpis.get('total_dormant_balance_aed', "N/A"))
+
+        # --- Charts for Summary ---
+        st.subheader("Visual Insights")
+        # Chart 1: Dormancy Categories Count
+        dormancy_counts_data = {
+            "SDB": summary_kpis.get("count_sdb_dormant", 0),
+            "Investment": summary_kpis.get("count_investment_dormant", 0),
+            "Fixed Deposit": summary_kpis.get("count_fixed_deposit_dormant", 0),
+            "Demand Deposit": summary_kpis.get("count_demand_deposit_dormant", 0),
+            "Unclaimed PI": summary_kpis.get("count_unclaimed_instruments", 0),
+        }
+        dormancy_counts_df = pd.DataFrame(list(dormancy_counts_data.items()), columns=['Category', 'Count']).set_index('Category')
+        if not dormancy_counts_df.empty:
+            st.bar_chart(dormancy_counts_df, height=300)
+        else:
+            st.info("No data for dormancy category chart.")
+
+        # Prepare text for AI summary
+        summary_input_text = f"Dormancy Analysis Report (Date: {results.get('report_date_used')}, Total Analyzed: {results.get('total_accounts_analyzed')})\n"
+        for key, val_dict in results.items():
+            if isinstance(val_dict, dict) and "desc" in val_dict and "count" in val_dict:
+                 if not val_dict["desc"].startswith("(Skipped"): # Avoid adding skipped checks to AI summary
+                    summary_input_text += f"- {val_dict['desc']}\n"
+        summary_input_text += "\nSummary KPIs:\n"
+        for k,v in summary_kpis.items():
+            summary_input_text += f"  - {k.replace('_', ' ').title()}: {v}\n"
 
 
-def render_summarized_dormant_analysis(df, threshold_3y, threshold_5y, llm):
-    """Render the summarized dormant analysis UI."""
-    st.subheader("📈 Summarized Dormant Analysis Results")
-
-    if st.button("📊 Run Summarized Dormant Analysis", key="run_summary_dormant_button"):
-        with st.spinner("Running all dormant checks..."):
+        st.subheader("📝 AI Generated Summary & Insights")
+        if llm:
             try:
-                # Run the analysis
-                results = run_all_dormant_checks(df, threshold_3y, threshold_5y)
-
-                # Store results in session state for later reference
-                st.session_state.dormant_summary_results = results
-
-                # Display the numerical summary
-                st.subheader("🔢 Dormant Account Summary (3-Year Threshold)")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric(
-                        "Uncontacted Safe Deposit (>3y)",
-                        results["sd"]["count"],
-                        help=results["sd"]["desc"]
-                    )
-                    st.metric(
-                        "General Inactivity (>3y)",
-                        results["gen"]["count"],
-                        help=results["gen"]["desc"]
-                    )
-                with col2:
-                    st.metric(
-                        "Uncontacted Investment (>3y)",
-                        results["inv"]["count"],
-                        help=results["inv"]["desc"]
-                    )
-                    st.metric(
-                        "Unreachable & 'Dormant'",
-                        results["unr"]["count"],
-                        help=results["unr"]["desc"]
-                    )
-                with col3:
-                    st.metric(
-                        "Fixed Deposit Inactivity (>3y)",
-                        results["fd"]["count"],
-                        help=results["fd"]["desc"]
-                    )
-
-                # Display Central Bank transfer eligibility (5-year threshold)
-                st.subheader("🏛️ Central Bank Transfer Eligibility (5-Year Threshold)")
-                transfer_col1, transfer_col2, transfer_col3 = st.columns(3)
-
-                with transfer_col1:
-                    sd_transfer_count = len(results["sd"]["transfer_df"]) if results["sd"][
-                                                                                 "transfer_df"] is not None else 0
-                    st.metric(
-                        "Safe Deposit Transfer-Eligible",
-                        sd_transfer_count,
-                        help="Accounts eligible for Central Bank transfer (>5y)"
-                    )
-
-                    gen_transfer_count = len(results["gen"]["transfer_df"]) if results["gen"][
-                                                                                   "transfer_df"] is not None else 0
-                    st.metric(
-                        "General Accounts Transfer-Eligible",
-                        gen_transfer_count,
-                        help="Accounts eligible for Central Bank transfer (>5y)"
-                    )
-
-                with transfer_col2:
-                    inv_transfer_count = len(results["inv"]["transfer_df"]) if results["inv"][
-                                                                                   "transfer_df"] is not None else 0
-                    st.metric(
-                        "Investment Transfer-Eligible",
-                        inv_transfer_count,
-                        help="Accounts eligible for Central Bank transfer (>5y)"
-                    )
-
-                    unr_transfer_count = len(results["unr"]["transfer_df"]) if results["unr"][
-                                                                                   "transfer_df"] is not None else 0
-                    st.metric(
-                        "Unreachable Transfer-Eligible",
-                        unr_transfer_count,
-                        help="Accounts eligible for Central Bank transfer (>5y)"
-                    )
-
-                with transfer_col3:
-                    fd_transfer_count = len(results["fd"]["transfer_df"]) if results["fd"][
-                                                                                 "transfer_df"] is not None else 0
-                    st.metric(
-                        "Fixed Deposit Transfer-Eligible",
-                        fd_transfer_count,
-                        help="Accounts eligible for Central Bank transfer (>5y)"
-                    )
-
-                    total_transfer_eligible = sd_transfer_count + inv_transfer_count + fd_transfer_count + gen_transfer_count + unr_transfer_count
-                    st.metric(
-                        "Total Transfer-Eligible",
-                        total_transfer_eligible,
-                        help="Total accounts eligible for Central Bank transfer (>5y)"
-                    )
-
-                # Prepare input text for AI summary
-                summary_input_text = (
-                    f"Dormant Analysis Findings ({results['total_accounts']} total accounts analyzed):\n\n"
-                    f"3-Year Dormancy Threshold Results:\n"
-                    f"- {results['sd']['desc']}\n"
-                    f"- {results['inv']['desc']}\n"
-                    f"- {results['fd']['desc']}\n"
-                    f"- {results['gen']['desc']}\n"
-                    f"- {results['unr']['desc']}\n\n"
-                    f"5-Year Central Bank Transfer Eligibility:\n"
-                    f"- Safe Deposit Transfer-Eligible: {sd_transfer_count} accounts\n"
-                    f"- Investment Transfer-Eligible: {inv_transfer_count} accounts\n"
-                    f"- Fixed Deposit Transfer-Eligible: {fd_transfer_count} accounts\n"
-                    f"- General Accounts Transfer-Eligible: {gen_transfer_count} accounts\n"
-                    f"- Unreachable Transfer-Eligible: {unr_transfer_count} accounts\n"
-                    f"- Total Transfer-Eligible: {total_transfer_eligible} accounts"
-                )
-
-                st.subheader("📝 Narrative Summary")
-                narrative_summary = summary_input_text  # Default to raw data in case AI fails
-
-                if llm:
-                    try:
-                        with st.spinner("Generating AI Summary..."):
-                            # Use the predefined summary prompt template
-                            summary_prompt_template = PromptTemplate.from_template(DORMANT_SUMMARY_PROMPT)
-                            summary_chain = summary_prompt_template | llm | StrOutputParser()
-                            narrative_summary = summary_chain.invoke({
-                                "analysis_details": summary_input_text
-                            })
-                            st.markdown(narrative_summary)
-                            st.session_state.dormant_narrative_summary = narrative_summary  # Store for PDF
-                    except Exception as llm_e:
-                        st.error(f"AI summary generation failed: {llm_e}")
-                        fallback_summary = get_fallback_response("dormant_summary")
-                        st.warning(fallback_summary)
-                        st.text_area("Raw Findings:", summary_input_text, height=150)
-                        st.session_state.dormant_narrative_summary = f"{fallback_summary}\n\nRaw Findings:\n{summary_input_text}"
-                else:
-                    fallback_summary = get_fallback_response("dormant_summary")
-                    st.warning(fallback_summary)
-                    st.text_area("Raw Findings:", summary_input_text, height=150)
-                    st.session_state.dormant_narrative_summary = f"{fallback_summary}\n\nRaw Findings:\n{summary_input_text}"
-
-                # High-Value Dormant Account section
-                st.subheader("💰 High-Value Dormant Accounts (≥ AED 25,000)")
-
-                # Combine all dormant accounts
-                all_dormant = pd.concat([
-                    results["sd"]["df"] if not results["sd"]["df"].empty else pd.DataFrame(),
-                    results["inv"]["df"] if not results["inv"]["df"].empty else pd.DataFrame(),
-                    results["fd"]["df"] if not results["fd"]["df"].empty else pd.DataFrame(),
-                    results["gen"]["df"] if not results["gen"]["df"].empty else pd.DataFrame(),
-                    results["unr"]["df"] if not results["unr"]["df"].empty else pd.DataFrame()
-                ])
-
-                # Check if 'Balance' column exists for high-value filtering
-                if 'Balance' in all_dormant.columns:
-                    high_value = all_dormant[all_dormant['Balance'] >= 25000]
-                    st.metric(
-                        "High-Value Dormant Accounts",
-                        len(high_value),
-                        help="Dormant accounts with balance ≥ AED 25,000"
-                    )
-
-                    if not high_value.empty and st.checkbox("View High-Value Dormant Accounts"):
-                        st.dataframe(high_value.head(15))
-                else:
-                    st.warning("Balance information not available to identify high-value accounts.")
-
-                # Export options
-                st.subheader("⬇️ Export Summary")
-
-                # Create report sections for PDF
-                sections = [
-                    {
-                        "title": "Dormant Account Summary (3-Year Threshold)",
-                        "content": f"- {results['sd']['desc']}\n- {results['inv']['desc']}\n- {results['fd']['desc']}\n- {results['gen']['desc']}\n- {results['unr']['desc']}"
-                    },
-                    {
-                        "title": "Central Bank Transfer Eligibility (5-Year Threshold)",
-                        "content": f"- Safe Deposit Transfer-Eligible: {sd_transfer_count} accounts\n- Investment Transfer-Eligible: {inv_transfer_count} accounts\n- Fixed Deposit Transfer-Eligible: {fd_transfer_count} accounts\n- General Accounts Transfer-Eligible: {gen_transfer_count} accounts\n- Unreachable Transfer-Eligible: {unr_transfer_count} accounts\n- Total Transfer-Eligible: {total_transfer_eligible} accounts"
-                    },
-                    {
-                        "title": "Narrative Summary (AI Generated or Raw Findings)",
-                        "content": st.session_state.get('dormant_narrative_summary',
-                                                        "Summary not generated or AI failed.")
-                    }
-                ]
-
-                # Add download button
-                download_pdf_button(
-                    "Dormant Account Analysis Summary Report",
-                    sections,
-                    f"dormant_summary_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                )
-
+                with st.spinner("Generating AI summary for all dormancy checks..."):
+                    prompt_template = PromptTemplate.from_template(DORMANT_SUMMARY_PROMPT)
+                    chain = prompt_template | llm | StrOutputParser()
+                    ai_summary = chain.invoke({"analysis_details": summary_input_text})
+                st.markdown(ai_summary)
+                st.session_state.dormant_ai_summary_text_ui = ai_summary
             except Exception as e:
-                st.error(f"Error running dormant account analysis: {e}")
-                st.exception(e)
+                st.error(f"AI summary generation failed: {e}")
+                st.session_state.dormant_ai_summary_text_ui = get_fallback_response("dormant_summary") + f"\n\nRaw Data:\n{summary_input_text}"
+                st.warning(st.session_state.dormant_ai_summary_text_ui)
+        else:
+            st.warning("LLM not available. Displaying raw findings.")
+            st.text_area("Raw Findings for Summary", summary_input_text, height=200)
+            st.session_state.dormant_ai_summary_text_ui = summary_input_text
+
+        # --- Export Options for Summary ---
+        st.subheader("⬇️ Export Summarized Report")
+        summary_report_sections = [
+            {"title": "Dormancy Analysis Overview", "content": summary_input_text},
+            {"title": "AI Generated Summary", "content": st.session_state.get("dormant_ai_summary_text_ui", "AI Summary not generated.")}
+        ]
+        download_pdf_button("Dormancy_Analysis_Summary_Report", summary_report_sections, "dormancy_summary_report.pdf")
+
+        with st.expander("View Raw Results for All Dormancy Checks"):
+            st.json(results, expanded=False)
 
 
-def render_central_bank_transfer_report(df, threshold_3y, threshold_5y, llm):
-    """Render a dedicated UI for Central Bank transfer reporting."""
-    st.subheader("🏛️ Central Bank Transfer Report")
+# --- Individual Agent View ---
+def render_individual_dormant_agent_view(df, selected_agent_key, report_date_str, llm, dormant_flags_history_df):
+    st.subheader(f"🔍 Results for: {selected_agent_key}")
 
-    if st.button("Generate Central Bank Transfer Report", key="central_bank_report_button"):
-        with st.spinner("Analyzing accounts eligible for Central Bank transfer..."):
-            try:
-                results = run_all_dormant_checks(df, threshold_3y, threshold_5y)
-
-                # Collect all transfer-eligible accounts
-                transfer_accounts = pd.DataFrame()
-
-                for key in ["sd", "inv", "fd", "gen", "unr"]:
-                    if results[key]["transfer_df"] is not None and not results[key]["transfer_df"].empty:
-                        category_df = results[key]["transfer_df"].copy()
-                        category_df['Category'] = key.upper()  # Add category identifier
-                        transfer_accounts = pd.concat([transfer_accounts, category_df])
-
-                total_transfer_eligible = len(transfer_accounts)
-
-                if total_transfer_eligible > 0:
-                    # Convert foreign currencies to AED
-                    try:
-                        if 'Currency' in transfer_accounts.columns and not all(transfer_accounts['Currency'] == 'AED'):
-                            transfer_accounts = convert_foreign_currencies(transfer_accounts)
-                    except Exception as conv_err:
-                        st.warning(f"Currency conversion warning: {conv_err}")
-
-                    # Prepare for Central Bank submission format
-                    cb_formatted = prepare_central_bank_transfer(transfer_accounts)
-
-                    st.success(f"Found {total_transfer_eligible} accounts eligible for Central Bank transfer.")
-
-                    # Display statistics
-                    if 'Balance' in transfer_accounts.columns:
-                        total_balance = transfer_accounts['Balance'].sum()
-                        avg_balance = transfer_accounts['Balance'].mean()
-                        max_balance = transfer_accounts['Balance'].max()
-
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Total Transfer Balance", f"AED {total_balance:,.2f}")
-                        with col2:
-                            st.metric("Average Account Balance", f"AED {avg_balance:,.2f}")
-                        with col3:
-                            st.metric("Maximum Account Balance", f"AED {max_balance:,.2f}")
-
-                    # Display formatted data
-                    if st.checkbox("View Central Bank Report Data (First 15 rows)"):
-                        st.dataframe(cb_formatted.head(15))
-
-                    # Breakdown by account type
-                    st.subheader("Breakdown by Account Type")
-
-                    if not transfer_accounts.empty and 'Category' in transfer_accounts.columns:
-                        category_counts = transfer_accounts['Category'].value_counts()
-                        st.bar_chart(category_counts)
-
-                    # CBUAE format note
-                    st.info(
-                        "The exported file will follow the Central Bank of UAE formatting requirements per Article 8 of the Dormant Accounts Regulation.")
-
-                    # Download options
-                    st.subheader("⬇️ Export Central Bank Report")
-
-                    download_csv_button(
-                        cb_formatted,
-                        f"central_bank_transfer_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                    )
-
-                    # PDF summary report
-                    sections = [
-                        {
-                            "title": "Central Bank Transfer Summary",
-                            "content": f"- Total Accounts: {total_transfer_eligible}\n- Total Balance: AED {total_balance if 'Balance' in transfer_accounts.columns else 'N/A'}\n- Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                        },
-                        {
-                            "title": "Account Type Breakdown",
-                            "content": "\n".join([f"- {cat}: {count} accounts" for cat, count in
-                                                  category_counts.items()]) if 'Category' in transfer_accounts.columns else "Category breakdown not available"
-                        },
-                        {
-                            "title": "CBUAE Compliance Note",
-                            "content": "This report follows the Central Bank of UAE requirements per Article 8 of the Dormant Accounts Regulation. Accounts included have been inactive for 5+ years with no customer contact."
-                        }
-                    ]
-
-                    download_pdf_button(
-                        "Central Bank Transfer Report Summary",
-                        sections,
-                        f"cb_transfer_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                    )
-
-                else:
-                    st.info("No accounts are currently eligible for Central Bank transfer (>5 years dormant).")
-
-            except Exception as e:
-                st.error(f"Error generating Central Bank transfer report: {e}")
-                st.exception(e)
-
-
-def render_individual_dormant_agent(df, agent_option, threshold_3y, threshold_5y, llm):
-    """Render the UI for an individual dormant agent."""
-    st.subheader(f"Agent Task Results: {agent_option}")
-    data_filtered = pd.DataFrame()
-    data_transfer = pd.DataFrame()  # For 5-year threshold
-    agent_desc = "Select an agent above."
-    agent_executed = False
-
-    agent_mapping = {
-        "🔐 Safe Deposit Box Agent": check_safe_deposit,
-        "💼 Investment Inactivity Agent": check_investment_inactivity,
-        "🏦 Fixed Deposit Agent": check_fixed_deposit_inactivity,
-        "📉 3-Year General Inactivity Agent": check_general_inactivity,
-        "📵 Unreachable + No Active Accounts Agent": check_unreachable_dormant
+    # Agent mapping (key from dropdown to function and description)
+    # Ensure function names match your `agents.dormant.py`
+    agent_functions_dormant = {
+        "SDB: Safe Deposit Box Dormancy": (check_safe_deposit_dormancy, "Identifies Safe Deposit Boxes meeting dormancy criteria (Art. 2.6)."),
+        "INV: Investment Account Inactivity": (check_investment_inactivity, "Identifies Investment Accounts meeting dormancy criteria (Art. 2.3)."),
+        "FD: Fixed Deposit Inactivity": (check_fixed_deposit_inactivity, "Identifies Fixed/Term Deposit accounts meeting dormancy criteria (Art. 2.2)."),
+        "DD: Demand Deposit Inactivity": (check_demand_deposit_inactivity, "Identifies Demand Deposit accounts meeting dormancy criteria (Art. 2.1.1)."),
+        "PI: Unclaimed Payment Instruments": (check_unclaimed_payment_instruments, "Identifies unclaimed Bankers Cheques, Bank Drafts, Cashier Orders (Art. 2.4)."),
+        "CB: Eligible for CBUAE Transfer": (check_eligible_for_cb_transfer, "Identifies accounts/balances eligible for transfer to Central Bank (Art. 8.1, 8.2)."),
+        "ART3: Article 3 Process Needed": (check_art3_process_needed, "Identifies accounts needing/undergoing Art. 3 process (contact/wait period)."),
+        "CON: Contact Attempts Needed (Proactive)": (check_contact_attempts_needed, "Identifies accounts nearing dormancy needing proactive contact attempts."),
+        "HV: High-Value Dormant Accounts (≥ AED 25k)": (check_high_value_dormant_accounts, "Identifies high-value dormant accounts (Balance >= AED 25,000)."),
+        "DA: Dormant-to-Active Transitions": (check_dormant_to_active_transitions, "Identifies accounts that were previously dormant but have shown recent activity.")
     }
 
-    if selected_agent := agent_mapping.get(agent_option):
-        with st.spinner(f"Running {agent_option}..."):
-            try:
-                # Pass necessary args based on agent
-                if agent_option in [
-                    "🔐 Safe Deposit Box Agent",
-                    "💼 Investment Inactivity Agent",
-                    "🏦 Fixed Deposit Agent",
-                    "📉 3-Year General Inactivity Agent"
-                ]:
-                    data_filtered, count, agent_desc, data_transfer = selected_agent(df, threshold_3y, threshold_5y)
-                else:  # "📵 Unreachable + No Active Accounts Agent"
-                    data_filtered, count, agent_desc, data_transfer = selected_agent(df)
-                agent_executed = True
+    agent_func_tuple = agent_functions_dormant.get(selected_agent_key)
+    if not agent_func_tuple:
+        st.error(f"No function mapped for '{selected_agent_key}'. Please check UI configuration.")
+        return
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Dormant Accounts (>3y)", count, help=agent_desc)
-                with col2:
-                    transfer_count = len(data_transfer) if data_transfer is not None else 0
-                    st.metric("Transfer-Eligible (>5y)", transfer_count,
-                              help="Accounts eligible for Central Bank transfer")
+    agent_func, default_desc = agent_func_tuple
+    data_filtered = pd.DataFrame()
+    count = 0
+    agent_run_desc = default_desc
+    details = {}
+    report_date = datetime.strptime(report_date_str, "%Y-%m-%d")
 
-                st.markdown(f"**Agent Description:** {agent_desc}")
 
-            except Exception as agent_error:
-                st.error(f"Error running agent: {agent_error}")
-                st.exception(agent_error)
-                agent_executed = False
+    with st.spinner(f"Running {selected_agent_key}..."):
+        try:
+            # Call the specific agent function
+            if selected_agent_key == "HV: High-Value Dormant Accounts (≥ AED 25k)":
+                data_filtered, count, agent_run_desc, details = agent_func(df.copy())
+            elif selected_agent_key == "DA: Dormant-to-Active Transitions":
+                 data_filtered, count, agent_run_desc, details = agent_func(df.copy(), report_date, dormant_flags_history_df)
+            else: # Most other functions take df and report_date
+                data_filtered, count, agent_run_desc, details = agent_func(df.copy(), report_date)
+            st.toast(f"{selected_agent_key} analysis complete!", icon="🔬")
+        except Exception as e:
+            st.error(f"Error running {selected_agent_key}: {e}")
+            st.exception(e)
+            return
 
-    if agent_executed:
-        # Create tabs for 3-year and 5-year results
-        dormant_tab, transfer_tab = st.tabs(["3-Year Dormancy", "5-Year Transfer Eligible"])
+    st.metric(f"Items Identified by {selected_agent_key}", count)
+    st.caption(agent_run_desc)
 
-        with dormant_tab:
-            if not data_filtered.empty:
-                st.success(f"{len(data_filtered)} accounts identified as dormant (>3 years).")
-                if st.checkbox(f"View first 15 dormant accounts for '{agent_option}'",
-                               key=f"view_detected_{agent_option.replace(' ', '_')}"):
-                    # Display the DataFrame with original column names if available
-                    display_df = data_filtered.head(15).copy()
-                    if SESSION_COLUMN_MAPPING in st.session_state and st.session_state[SESSION_COLUMN_MAPPING]:
-                        try:
-                            # Create a display mapping that only includes columns present in the data
-                            display_columns_mapping = {
-                                std_col: st.session_state[SESSION_COLUMN_MAPPING].get(std_col, std_col)
-                                for std_col in display_df.columns if std_col in st.session_state[SESSION_COLUMN_MAPPING]
-                            }
-                            display_df.rename(columns=display_columns_mapping, inplace=True)
-                        except Exception as e:
-                            st.warning(f"Could not display original column names: {e}")
+    if details:
+        with st.expander("Additional Details from Check"):
+            st.json(details, expanded=False)
 
-                    st.dataframe(display_df)
-            elif len(data_filtered) == 0:
-                st.info("No accounts matching the 3-year dormancy criteria were found.")
+    if not data_filtered.empty:
+        st.markdown(f"**Top {min(5, len(data_filtered))} items identified:**")
+        st.dataframe(data_filtered.head(min(5, len(data_filtered))), height=200, use_container_width=True)
+        download_csv_button(data_filtered, f"{selected_agent_key.replace(': ', '_').replace(' ', '_').lower()}_data.csv")
 
-        with transfer_tab:
-            if data_transfer is not None and not data_transfer.empty:
-                st.success(f"{len(data_transfer)} accounts eligible for Central Bank transfer (>5 years).")
-                if st.checkbox(f"View first 15 transfer-eligible accounts for '{agent_option}'",
-                               key=f"view_transfer_{agent_option.replace(' ', '_')}"):
-                    # Display the DataFrame with original column names if available
-                    transfer_display_df = data_transfer.head(15).copy()
-                    if SESSION_COLUMN_MAPPING in st.session_state and st.session_state[SESSION_COLUMN_MAPPING]:
-                        try:
-                            # Create a display mapping that only includes columns present in the data
-                            transfer_display_columns_mapping = {
-                                std_col: st.session_state[SESSION_COLUMN_MAPPING].get(std_col, std_col)
-                                for std_col in transfer_display_df.columns if
-                                std_col in st.session_state[SESSION_COLUMN_MAPPING]
-                            }
-                            transfer_display_df.rename(columns=transfer_display_columns_mapping, inplace=True)
-                        except Exception as e:
-                            st.warning(f"Could not display original column names: {e}")
+        # --- AI Insights for Individual Agent Data ---
+        st.subheader(f"🤖 AI Insights for {selected_agent_key}")
+        if llm:
+            sample_for_ai = data_filtered.sample(min(len(data_filtered), 10)).to_csv(index=False) # Sample up to 10 rows
+            if st.button(f"Generate AI Insights for {selected_agent_key}", key=f"ai_btn_{selected_agent_key}"):
+                with st.spinner("Generating AI insights..."):
+                    # Observations
+                    obs_prompt = PromptTemplate.from_template(OBSERVATION_PROMPT)
+                    obs_chain = obs_prompt | llm | StrOutputParser()
+                    observations = obs_chain.invoke({"data": sample_for_ai})
+                    st.session_state[f"dormant_obs_{selected_agent_key}"] = observations
 
-                    st.dataframe(transfer_display_df)
-            elif data_transfer is None or len(data_transfer) == 0:
-                st.info("No accounts matching the 5-year transfer eligibility criteria were found.")
+                    # Trends
+                    trend_prompt = PromptTemplate.from_template(TREND_PROMPT)
+                    trend_chain = trend_prompt | llm | StrOutputParser()
+                    trends = trend_chain.invoke({"data": sample_for_ai})
+                    st.session_state[f"dormant_trend_{selected_agent_key}"] = trends
 
-        # Generate insights with LLM if available
-        if llm and not data_filtered.empty:
-            sample_size = min(15, len(data_filtered))
-            sample_data_csv = data_filtered.sample(n=sample_size).to_csv(index=False)
+                    # Narration
+                    narr_prompt = PromptTemplate.from_template(NARRATION_PROMPT)
+                    narr_chain = narr_prompt | llm | StrOutputParser()
+                    narration = narr_chain.invoke({"observation": observations, "trend": trends})
+                    st.session_state[f"dormant_narr_{selected_agent_key}"] = narration
 
-            # Initialize the prompt templates with our predefined prompts
-            observation_prompt = PromptTemplate.from_template(OBSERVATION_PROMPT)
-            trend_prompt = PromptTemplate.from_template(TREND_PROMPT)
+                    # Actions
+                    act_prompt = PromptTemplate.from_template(ACTION_PROMPT)
+                    act_chain = act_prompt | llm | StrOutputParser()
+                    actions = act_chain.invoke({"observation": observations, "trend": trends})
+                    st.session_state[f"dormant_act_{selected_agent_key}"] = actions
+                st.toast("AI insights generated!", icon="💡")
 
-            if st.button(f"Generate Insights for '{agent_option}'",
-                         key=f"generate_insights_{agent_option.replace(' ', '_')}"):
-                try:
-                    with st.spinner("Running insight agents..."):
-                        # Setup the LLM chains
-                        output_parser = StrOutputParser()
-                        observation_chain = observation_prompt | llm | output_parser
-                        trend_chain = trend_prompt | llm | output_parser
+            if f"dormant_narr_{selected_agent_key}" in st.session_state:
+                with st.expander("🔍 AI Observations", expanded=False):
+                    st.markdown(st.session_state[f"dormant_obs_{selected_agent_key}"])
+                with st.expander("📈 AI Trend Analysis", expanded=False):
+                    st.markdown(st.session_state[f"dormant_trend_{selected_agent_key}"])
+                with st.expander("📝 AI Narrative Summary", expanded=True):
+                    st.markdown(st.session_state[f"dormant_narr_{selected_agent_key}"])
+                with st.expander("🚀 AI Recommended Actions", expanded=True):
+                    st.markdown(st.session_state[f"dormant_act_{selected_agent_key}"])
 
-                        # Generate observations and trends
-                        obs_output = observation_chain.invoke({"data": sample_data_csv})
-                        trend_output = trend_chain.invoke({"data": sample_data_csv})
-
-                        # Generate summary and actions
-                        narration_prompt = PromptTemplate.from_template(NARRATION_PROMPT)
-                        action_prompt = PromptTemplate.from_template(ACTION_PROMPT)
-
-                        narration_chain = narration_prompt | llm | output_parser
-                        action_chain = action_prompt | llm | output_parser
-
-                        final_insight = narration_chain.invoke({"observation": obs_output, "trend": trend_output})
-                        action_output = action_chain.invoke({"observation": obs_output, "trend": trend_output})
-
-                    # Store insights in session state
-                    st.session_state[f'{agent_option}_insights'] = {
-                        'observation': obs_output,
-                        'trend': trend_output,
-                        'summary': final_insight,
-                        'actions': action_output
-                    }
-
-                    # Save to DB log
-                    try:
-                        if save_summary_to_db(obs_output, trend_output, final_insight, action_output):
-                            st.success("Insights saved to insight log.")
-                        else:
-                            st.error("Failed to save insights to DB log.")
-                    except Exception as e:
-                        st.error(f"Error saving insights to DB: {e}")
-
-                except Exception as insight_error:
-                    st.error(f"Error generating insights: {insight_error}")
-                    # Use fallback responses
-                    obs_output = get_fallback_response("observation")
-                    trend_output = get_fallback_response("trend")
-                    final_insight = get_fallback_response("narration")
-                    action_output = get_fallback_response("action")
-
-                    # Store fallback insights
-                    st.session_state[f'{agent_option}_insights'] = {
-                        'observation': obs_output,
-                        'trend': trend_output,
-                        'summary': final_insight,
-                        'actions': action_output
-                    }
-
-                    st.warning("Using fallback insights due to AI error.")
-
-            # Display insights if they exist in session state
-            if f'{agent_option}_insights' in st.session_state:
-                insights = st.session_state[f'{agent_option}_insights']
-                with st.expander("🔍 Observation Insight"):
-                    st.markdown(insights['observation'])
-                with st.expander("📊 Trend Insight"):
-                    st.markdown(insights['trend'])
-                with st.expander("📌 CXO Summary"):
-                    st.markdown(insights['summary'])
-                with st.expander("🚀 Recommended Actions"):
-                    st.markdown(insights['actions'])
-
-                # PDF export for individual agent insights
-                st.subheader("⬇️ Export Insights")
-                sections = [
-                    {"title": "Observations", "content": insights['observation']},
-                    {"title": "Trends", "content": insights['trend']},
-                    {"title": "Executive Summary", "content": insights['summary']},
-                    {"title": "Recommended Actions", "content": insights['actions']}
+                # PDF Export for individual agent insight
+                individual_report_sections = [
+                    {"title": f"Analysis Overview: {selected_agent_key}", "content": f"{count} items identified. Description: {agent_run_desc}"},
+                    {"title": "AI Observations", "content": st.session_state[f"dormant_obs_{selected_agent_key}"]},
+                    {"title": "AI Trend Analysis", "content": st.session_state[f"dormant_trend_{selected_agent_key}"]},
+                    {"title": "AI Narrative Summary", "content": st.session_state[f"dormant_narr_{selected_agent_key}"]},
+                    {"title": "AI Recommended Actions", "content": st.session_state[f"dormant_act_{selected_agent_key}"]},
                 ]
-
-                download_pdf_button(
-                    f"{agent_option} - Analysis Report",
-                    sections,
-                    f"{agent_option.replace(' ', '_').replace(':', '')}_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                )
-
-                # Add CSV download for identified accounts
-                st.markdown("#### Download Dormant Account Data")
-                download_csv_button(
-                    data_filtered,
-                    f"{agent_option.replace(' ', '_').replace(':', '')}_dormant_accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                )
-
-                # Add CSV download for transfer-eligible accounts
-                if data_transfer is not None and not data_transfer.empty:
-                    st.markdown("#### Download Transfer-Eligible Account Data")
-                    download_csv_button(
-                        data_transfer,
-                        f"{agent_option.replace(' ', '_').replace(':', '')}_transfer_accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                    )
-
-                elif len(data_filtered) > 0:
-                    st.info(f"AI Assistant not available to generate insights.")
-
-                    # Still provide CSV download even without AI
-                    st.subheader("⬇️ Export Data")
-
-                    st.markdown("#### Download Dormant Account Data")
-                    download_csv_button(
-                        data_filtered,
-                        f"{agent_option.replace(' ', '_').replace(':', '')}_dormant_accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                    )
-
-                    # Add CSV download for transfer-eligible accounts
-                    if data_transfer is not None and not data_transfer.empty:
-                        st.markdown("#### Download Transfer-Eligible Account Data")
-                        download_csv_button(
-                            data_transfer,
-                            f"{agent_option.replace(' ', '_').replace(':', '')}_transfer_accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                        )
+                download_pdf_button(f"{selected_agent_key}_Report", individual_report_sections, f"{selected_agent_key.replace(': ', '_').replace(' ', '_').lower()}_report.pdf")
+        else:
+            st.info("LLM not available for generating AI insights for individual checks.")
+    else:
+        st.info(f"No items identified by {selected_agent_key}.")

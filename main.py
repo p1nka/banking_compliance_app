@@ -5,6 +5,9 @@ import os
 import hashlib
 import hmac
 
+import ui
+from database.connection import get_db_connection
+
 # ⚠️ IMPORTANT: Set page config FIRST, before any other imports or operations ⚠️
 st.set_page_config(
     page_title="Banking Compliance Analysis Tool",
@@ -153,10 +156,22 @@ if check_password():
 
     # Try to initialize the database
     try:
-        init_db()
+        db_init= init_db()
     except Exception as e:
         st.sidebar.error(f"Database initialization error: {str(e)}")
         st.sidebar.info("Continuing with limited database functionality.")
+
+    if "report_date_for_dormancy" not in st.session_state:
+        st.session_state.report_date_for_dormancy = datetime.now().date()
+        # The UI functions expect a string
+    report_date_str = st.session_state.report_date_for_dormancy.strftime("%Y-%m-%d")
+    if "agent_name_for_compliance" not in st.session_state:
+        st.session_state.agent_name_for_compliance = "SystemAuditor"
+    agent_name_input = st.session_state.agent_name_for_compliance
+
+    # dormant_flags_history_df for dormant_ui
+    dormant_flags_history_df = pd.DataFrame()  # Default to empty
+
 
     # Render the sidebar with upload options
     render_sidebar()
@@ -188,9 +203,9 @@ if check_password():
 
         # Display different UI based on selected mode
         if app_mode == "🏦 Dormant Account Analyzer":
-            render_dormant_analyzer(df, llm)   # NEW
+            ui.dormant_ui.render_dormant_analyzer(df, report_date_str, llm, dormant_flags_history_df)   # NEW
         elif app_mode == "🔒 Compliance Analyzer":
-            render_compliance_analyzer(df, llm)
+            ui.compliance_ui.render_compliance_analyzer(df, agent_name_input, llm)
         elif app_mode == "🔍 SQL Bot":
             render_sqlbot(llm)
         elif app_mode == "💬 Chatbot Only":
