@@ -131,7 +131,7 @@ if check_password():
     from ui.chatbot_ui import render_chatbot
 
     # Import AI model
-    from ai.llm import get_llm
+    from ai.llm import load_llm
 
     # Display user information
     st.sidebar.markdown(f"**Logged in as:** {st.session_state['username']}")
@@ -144,7 +144,7 @@ if check_password():
     # Try to get the LLM model
     llm = None
     try:
-        llm = get_llm()
+        llm = load_llm()
         if llm is None:
             st.sidebar.warning("⚠️ AI Assistant not available. Some features will be limited.")
     except Exception as e:
@@ -188,7 +188,7 @@ if check_password():
 
         # Display different UI based on selected mode
         if app_mode == "🏦 Dormant Account Analyzer":
-            render_dormant_analyzer(df, llm)
+            render_dormant_analyzer(df, llm)   # NEW
         elif app_mode == "🔒 Compliance Analyzer":
             render_compliance_analyzer(df, llm)
         elif app_mode == "🔍 SQL Bot":

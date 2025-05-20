@@ -1,7 +1,9 @@
 import pyodbc
 import streamlit as st
 import time
-from .connection import get_db_connection
+
+import database
+from database.connection import get_db_connection
 from config import DB_NAME, DB_SERVER
 
 
@@ -175,7 +177,7 @@ def init_db():
 @st.cache_data(show_spinner="Fetching database schema for SQL Bot...", ttl="1h")  # Cache schema for 1 hour
 def get_db_schema():
     """Fetches schema for the default database."""
-    conn = get_db_connection()  # Always use the default cached connection helper
+    conn = database.connection.get_db_connection()  # Always use the default cached connection helper
 
     if conn is None:
         # Error message is already shown by get_db_connection
@@ -249,3 +251,94 @@ def get_db_schema():
     except Exception as e:
         st.error(f"SQL Bot: Unexpected error fetching schema from {db_identifier}: {e}")
         return None
+    # database/schema.py
+    """
+    Database schema utilities for the application.
+    """
+
+    from database.connection import get_db_connection
+
+    def get_db_schema():
+        """
+        Get the database schema information.
+
+        Returns:
+            dict: A dictionary of tables and their columns, or None if error
+        """
+        try:
+            conn = get_db_connection()
+            if not conn:
+                return None
+
+            cursor = conn.cursor()
+
+            # Get all tables from the database
+            tables_query = """
+                           SELECT TABLE_NAME
+                           FROM INFORMATION_SCHEMA.TABLES
+                           WHERE TABLE_TYPE = 'BASE TABLE'
+                             AND TABLE_CATALOG = DB_NAME()
+                           ORDER BY TABLE_NAME \
+                           """
+
+            cursor.execute(tables_query)
+            tables = cursor.fetchall()
+
+            schema = {}
+
+            # For each table, get its columns
+            for table in tables:
+                table_name = table[0]
+
+                columns_query = f"""
+                SELECT COLUMN_NAME, DATA_TYPE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = '{table_name}'
+                ORDER BY ORDINAL_POSITION
+                """
+
+                cursor.execute(columns_query)
+                columns = cursor.fetchall()
+
+                schema[table_name] = [(col[0], col[1]) for col in columns]
+
+            cursor.close()
+
+            return schema
+        except Exception as e:
+            print(f"Error retrieving database schema: {e}")
+            return None
+
+    def get_table_schema(table_name):
+        """
+        Get schema information for a specific table.
+
+        Args:
+            table_name (str): Name of the table
+
+        Returns:
+            list: A list of (column_name, data_type) tuples, or None if error
+        """
+        try:
+            conn = get_db_connection()
+            if not conn:
+                return None
+
+            cursor = conn.cursor()
+
+            columns_query = f"""
+            SELECT COLUMN_NAME, DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = '{table_name}'
+            ORDER BY ORDINAL_POSITION
+            """
+
+            cursor.execute(columns_query)
+            columns = cursor.fetchall()
+
+            cursor.close()
+
+            return [(col[0], col[1]) for col in columns]
+        except Exception as e:
+            print(f"Error retrieving table schema: {e}")
+            return None

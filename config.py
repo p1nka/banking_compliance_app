@@ -1,5 +1,51 @@
+# config.py
+"""
+Configuration settings for the application.
+"""
+
 import os
 
+# Try to load dotenv if available, but continue if not installed
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("Warning: python-dotenv package not installed. Environment variables will still be read, but .env file support is disabled.")
+    print("To enable .env file support, run: pip install python-dotenv")
+
+# Database configuration
+DB_SERVER = os.getenv("DB_SERVER", "agentdb123.database.windows.net")
+DB_NAME = os.getenv("DB_NAME", "compliance_db")
+DB_PORT = os.getenv("DB_PORT", "1433")
+DB_DRIVER = os.getenv("DB_DRIVER", "{ODBC Driver 18 for SQL Server}")
+
+# AI Model configuration
+AI_MODEL_PROVIDER = os.getenv("AI_MODEL_PROVIDER", "groq")
+AI_MODEL_NAME = os.getenv("AI_MODEL_NAME", "llama3-70b-8192")
+AI_API_KEY = os.getenv("AI_API_KEY", "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")
+
+# Application configuration
+APP_NAME = "Banking Compliance Assistant"
+APP_VERSION = "1.0.0"
+APP_TITLE = os.getenv("APP_TITLE", "Banking Compliance Assistant")
+APP_DESCRIPTION = "AI-powered banking compliance and data analysis tool"
+# Application constants
+
+APP_SUBTITLE = """
+This tool helps identify dormant accounts and analyze compliance requirements 
+according to banking regulations.
+"""
+
+import streamlit as st
+from datetime import datetime
+
+# Feature flags
+ENABLE_AI_FEATURES = os.getenv("ENABLE_AI_FEATURES", "true").lower() == "true"
+ENABLE_VISUALIZATION = os.getenv("ENABLE_VISUALIZATION", "true").lower() == "true"
+
+# Rate limits
+MAX_QUERIES_PER_DAY = int(os.getenv("MAX_QUERIES_PER_DAY", "100"))
+MAX_AI_TOKENS = int(os.getenv("MAX_AI_TOKENS", "6000"))
 # Application constants
 APP_TITLE = "Banking Compliance Analysis Tool"
 APP_SUBTITLE = """

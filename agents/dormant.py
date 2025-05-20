@@ -1,482 +1,408 @@
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 
 
-def check_safe_deposit(df, threshold_date):
+def check_safe_deposit(df, threshold_date_3y, threshold_date_5y=None):
     """
-    Detects dormant safe deposit boxes according to UAE regulations:
-    - Charges unpaid for more than 3 years
-    - No response from tenant after bank contact attempts
+    Detects safe deposit accounts inactive over threshold with no contact attempts.
 
     Args:
-        df: DataFrame containing account data
-        threshold_date: Date threshold (3 years prior to report date)
+        df (pandas.DataFrame): Account data
+        threshold_date_3y (datetime): 3-year threshold for initial dormancy
+        threshold_date_5y (datetime, optional): 5-year threshold for central bank transfer
 
     Returns:
-        Filtered DataFrame, count, and description
+        tuple: (filtered DataFrame, count, description, transfer_df)
     """
     try:
-        required_columns = [
-            'Account_ID', 'Customer_ID', 'Account_Type',
-            'SDB_Charges_Outstanding', 'Date_SDB_Charges_Became_Outstanding',
-            'SDB_Tenant_Communication_Received', 'Bank_Contact_Attempted_Post_Dormancy_Trigger'
-        ]
+        # Ensure columns exist and handle potential None/NaN in string comparisons
+        if not all(col in df.columns for col in
+                   ['Account_Type', 'Last_Transaction_Date', 'Email_Contact_Attempt', 'SMS_Contact_Attempt',
+                    'Phone_Call_Attempt']):
+            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Safe Deposit check)", pd.DataFrame()
 
-        if not all(col in df.columns for col in required_columns):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Safe Deposit check)"
-
-        # Convert date columns to datetime if they aren't already
-        date_cols = ['Date_SDB_Charges_Became_Outstanding']
-        for col in date_cols:
-            if col in df.columns and not pd.api.types.is_datetime64_dtype(df[col]):
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-
-        # Filter safe deposit boxes with outstanding charges > 3 years
+        # Initial dormancy check (3 years)
         data = df[
-            # Account type is Safe Deposit Box
             (df['Account_Type'].astype(str).str.contains("Safe Deposit", case=False, na=False)) &
-            # Has outstanding charges
-            (df['SDB_Charges_Outstanding'].astype(float) > 0) &
-            # Date when charges became outstanding is more than 3 years ago
-            (df['Date_SDB_Charges_Became_Outstanding'].notna()) &
-            (df['Date_SDB_Charges_Became_Outstanding'] < threshold_date) &
-            # Bank contact was attempted
-            (df['Bank_Contact_Attempted_Post_Dormancy_Trigger'].astype(str).str.lower().isin(
-                ['yes', 'true', '1', 'y'])) &
-            # No communication received from tenant
-            (~df['SDB_Tenant_Communication_Received'].astype(str).str.lower().isin(['yes', 'true', '1', 'y']))
+            (df['Last_Transaction_Date'].notna()) &  # Ensure date is not NaT
+            (df['Last_Transaction_Date'] < threshold_date_3y) &
+            (df['Email_Contact_Attempt'].astype(str).str.lower() == 'no') &  # Handle NaNs by converting to str
+            (df['SMS_Contact_Attempt'].astype(str).str.lower() == 'no') &
+            (df['Phone_Call_Attempt'].astype(str).str.lower() == 'no')
             ]
 
+        # Check for accounts ready for central bank transfer (5 years)
+        transfer_df = pd.DataFrame()
+        if threshold_date_5y is not None:
+            transfer_df = df[
+                (df['Account_Type'].astype(str).str.contains("Safe Deposit", case=False, na=False)) &
+                (df['Last_Transaction_Date'].notna()) &
+                (df['Last_Transaction_Date'] < threshold_date_5y) &
+                (df['Email_Contact_Attempt'].astype(str).str.lower() == 'no') &
+                (df['SMS_Contact_Attempt'].astype(str).str.lower() == 'no') &
+                (df['Phone_Call_Attempt'].astype(str).str.lower() == 'no')
+                ]
+
         count = len(data)
-        desc = f"Safe Deposit boxes dormant (>3y unpaid fees): {count} accounts"
-        return data, count, desc
+        transfer_count = len(transfer_df)
+        desc = f"Safe Deposit without contact attempts (>3y): {count} accounts, ({transfer_count} eligible for Central Bank transfer)"
+        return data, count, desc, transfer_df
     except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Safe Deposit check: {e})"
+        return pd.DataFrame(), 0, f"(Error in Safe Deposit check: {e})", pd.DataFrame()
 
 
-def check_investment_inactivity(df, threshold_date):
+def check_investment_inactivity(df, threshold_date_3y, threshold_date_5y=None):
     """
-    Detects dormant investment accounts according to UAE regulations:
-    - 3+ years from maturity/redemption date
-    - No customer communication
+    Detects investment accounts inactive over threshold with no contact attempts.
 
     Args:
-        df: DataFrame containing account data
-        threshold_date: Date threshold (3 years prior to report date)
+        df (pandas.DataFrame): Account data
+        threshold_date_3y (datetime): 3-year threshold for initial dormancy
+        threshold_date_5y (datetime, optional): 5-year threshold for central bank transfer
 
     Returns:
-        Filtered DataFrame, count, and description
+        tuple: (filtered DataFrame, count, description, transfer_df)
     """
     try:
-        required_columns = [
-            'Account_ID', 'Customer_ID', 'Account_Type',
-            'Inv_Maturity_Redemption_Date', 'Date_Last_Customer_Communication_Any_Type'
-        ]
+        if not all(col in df.columns for col in
+                   ['Account_Type', 'Last_Transaction_Date', 'Email_Contact_Attempt', 'SMS_Contact_Attempt',
+                    'Phone_Call_Attempt']):
+            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Investment check)", pd.DataFrame()
 
-        if not all(col in df.columns for col in required_columns):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Investment check)"
-
-        # Convert date columns to datetime if they aren't already
-        date_cols = ['Inv_Maturity_Redemption_Date', 'Date_Last_Customer_Communication_Any_Type']
-        for col in date_cols:
-            if col in df.columns and not pd.api.types.is_datetime64_dtype(df[col]):
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-
-        # Filter investment accounts dormant as per UAE regulation
+        # Initial dormancy check (3 years)
         data = df[
-            # Account type is Investment
             (df['Account_Type'].astype(str).str.contains("Investment", case=False, na=False)) &
-            # Has maturity/redemption date > 3 years ago
-            (df['Inv_Maturity_Redemption_Date'].notna()) &
-            (df['Inv_Maturity_Redemption_Date'] < threshold_date) &
-            # Either no customer communication at all or last communication > 3 years ago
-            ((df['Date_Last_Customer_Communication_Any_Type'].isna()) |
-             (df['Date_Last_Customer_Communication_Any_Type'] < threshold_date))
+            (df['Last_Transaction_Date'].notna()) &
+            (df['Last_Transaction_Date'] < threshold_date_3y) &
+            (df['Email_Contact_Attempt'].astype(str).str.lower() == 'no') &
+            (df['SMS_Contact_Attempt'].astype(str).str.lower() == 'no') &
+            (df['Phone_Call_Attempt'].astype(str).str.lower() == 'no')
             ]
 
+        # Check for accounts ready for central bank transfer (5 years)
+        transfer_df = pd.DataFrame()
+        if threshold_date_5y is not None:
+            transfer_df = df[
+                (df['Account_Type'].astype(str).str.contains("Investment", case=False, na=False)) &
+                (df['Last_Transaction_Date'].notna()) &
+                (df['Last_Transaction_Date'] < threshold_date_5y) &
+                (df['Email_Contact_Attempt'].astype(str).str.lower() == 'no') &
+                (df['SMS_Contact_Attempt'].astype(str).str.lower() == 'no') &
+                (df['Phone_Call_Attempt'].astype(str).str.lower() == 'no')
+                ]
+
         count = len(data)
-        desc = f"Investment accounts dormant (>3y from maturity): {count} accounts"
-        return data, count, desc
+        transfer_count = len(transfer_df)
+        desc = f"Investment accounts without activity or contact (>3y): {count} accounts, ({transfer_count} eligible for Central Bank transfer)"
+        return data, count, desc, transfer_df
     except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Investment inactivity check: {e})"
+        return pd.DataFrame(), 0, f"(Error in Investment inactivity check: {e})", pd.DataFrame()
 
 
-def check_fixed_deposit_inactivity(df, threshold_date):
+def check_fixed_deposit_inactivity(df, threshold_date_3y, threshold_date_5y=None):
     """
-    Detects dormant fixed deposit accounts according to UAE regulations:
-    - Matured deposits not renewed or claimed for 3+ years
-    - No auto-renewal clause
-    - No customer communication after maturity
+    Detects fixed deposit accounts inactive over threshold.
 
     Args:
-        df: DataFrame containing account data
-        threshold_date: Date threshold (3 years prior to report date)
+        df (pandas.DataFrame): Account data
+        threshold_date_3y (datetime): 3-year threshold for initial dormancy
+        threshold_date_5y (datetime, optional): 5-year threshold for central bank transfer
 
     Returns:
-        Filtered DataFrame, count, and description
+        tuple: (filtered DataFrame, count, description, transfer_df)
     """
     try:
-        required_columns = [
-            'Account_ID', 'Customer_ID', 'Account_Type',
-            'FTD_Maturity_Date', 'FTD_Auto_Renewal',
-            'Date_Last_FTD_Renewal_Claim_Request', 'Date_Last_Customer_Communication_Any_Type'
-        ]
+        if not all(col in df.columns for col in ['Account_Type', 'Last_Transaction_Date']):
+            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Fixed Deposit check)", pd.DataFrame()
 
-        if not all(col in df.columns for col in required_columns):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Fixed Deposit check)"
-
-        # Convert date columns to datetime if they aren't already
-        date_cols = ['FTD_Maturity_Date', 'Date_Last_FTD_Renewal_Claim_Request',
-                     'Date_Last_Customer_Communication_Any_Type']
-        for col in date_cols:
-            if col in df.columns and not pd.api.types.is_datetime64_dtype(df[col]):
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-
-        # Filter fixed deposit accounts dormant as per UAE regulation
+        # Initial dormancy check (3 years)
         data = df[
-            # Account type is Fixed Deposit
-            (df['Account_Type'].astype(str).str.contains("Fixed|Term", case=False, na=False)) &
-            # Has maturity date > 3 years ago
-            (df['FTD_Maturity_Date'].notna()) &
-            (df['FTD_Maturity_Date'] < threshold_date) &
-            # No auto-renewal clause
-            (~df['FTD_Auto_Renewal'].astype(str).str.lower().isin(['yes', 'true', '1', 'y'])) &
-            # Either no renewal/claim request at all or last request > 3 years ago
-            ((df['Date_Last_FTD_Renewal_Claim_Request'].isna()) |
-             (df['Date_Last_FTD_Renewal_Claim_Request'] < threshold_date)) &
-            # Either no customer communication at all or last communication > 3 years ago
-            ((df['Date_Last_Customer_Communication_Any_Type'].isna()) |
-             (df['Date_Last_Customer_Communication_Any_Type'] < threshold_date))
+            (df['Account_Type'].astype(str).str.lower() == 'fixed deposit') &
+            (df['Last_Transaction_Date'].notna()) &
+            (df['Last_Transaction_Date'] < threshold_date_3y)
             ]
 
+        # Check for accounts ready for central bank transfer (5 years)
+        transfer_df = pd.DataFrame()
+        if threshold_date_5y is not None:
+            transfer_df = df[
+                (df['Account_Type'].astype(str).str.lower() == 'fixed deposit') &
+                (df['Last_Transaction_Date'].notna()) &
+                (df['Last_Transaction_Date'] < threshold_date_5y)
+                ]
+
         count = len(data)
-        desc = f"Fixed deposit accounts dormant (>3y after maturity): {count} accounts"
-        return data, count, desc
+        transfer_count = len(transfer_df)
+        desc = f"Fixed deposit accounts with no activity (>3y): {count} accounts, ({transfer_count} eligible for Central Bank transfer)"
+        return data, count, desc, transfer_df
     except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Fixed Deposit inactivity check: {e})"
+        return pd.DataFrame(), 0, f"(Error in Fixed Deposit inactivity check: {e})", pd.DataFrame()
 
 
-def check_demand_deposit_inactivity(df, threshold_date):
+def check_general_inactivity(df, threshold_date_3y, threshold_date_5y=None):
     """
-    Detects dormant demand deposit accounts according to UAE regulations:
-    - Current/Savings/Call accounts with 3+ years of inactivity
-    - No customer-initiated activity
-    - No customer communication
+    Detects Savings/Call/Current accounts inactive over threshold.
 
     Args:
-        df: DataFrame containing account data
-        threshold_date: Date threshold (3 years prior to report date)
+        df (pandas.DataFrame): Account data
+        threshold_date_3y (datetime): 3-year threshold for initial dormancy
+        threshold_date_5y (datetime, optional): 5-year threshold for central bank transfer
 
     Returns:
-        Filtered DataFrame, count, and description
+        tuple: (filtered DataFrame, count, description, transfer_df)
     """
     try:
-        required_columns = [
-            'Account_ID', 'Customer_ID', 'Account_Type',
-            'Date_Last_Cust_Initiated_Activity', 'Date_Last_Customer_Communication_Any_Type',
-            'Customer_Has_Active_Liability_Account'
-        ]
+        if not all(col in df.columns for col in ['Account_Type', 'Last_Transaction_Date']):
+            return pd.DataFrame(), 0, "(Skipped: Required columns missing for General Inactivity check)", pd.DataFrame()
 
-        if not all(col in df.columns for col in required_columns):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Demand Deposit check)"
-
-        # Convert date columns to datetime if they aren't already
-        date_cols = ['Date_Last_Cust_Initiated_Activity', 'Date_Last_Customer_Communication_Any_Type']
-        for col in date_cols:
-            if col in df.columns and not pd.api.types.is_datetime64_dtype(df[col]):
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-
-        # Filter demand deposit accounts dormant as per UAE regulation
+        # Initial dormancy check (3 years)
         data = df[
-            # Account type is Current, Savings or Call
-            (df['Account_Type'].astype(str).str.contains("Current|Saving|Call", case=False, na=False)) &
-            # Last customer activity > 3 years ago
-            (df['Date_Last_Cust_Initiated_Activity'].notna()) &
-            (df['Date_Last_Cust_Initiated_Activity'] < threshold_date) &
-            # Either no customer communication at all or last communication > 3 years ago
-            ((df['Date_Last_Customer_Communication_Any_Type'].isna()) |
-             (df['Date_Last_Customer_Communication_Any_Type'] < threshold_date)) &
-            # Customer does not have other active accounts with the bank
-            (~df['Customer_Has_Active_Liability_Account'].astype(str).str.lower().isin(['yes', 'true', '1', 'y']))
+            (df['Account_Type'].astype(str).isin(["Savings", "Call", "Current"])) &
+            (df['Last_Transaction_Date'].notna()) &
+            (df['Last_Transaction_Date'] < threshold_date_3y)
             ]
 
+        # Check for accounts ready for central bank transfer (5 years)
+        transfer_df = pd.DataFrame()
+        if threshold_date_5y is not None:
+            transfer_df = df[
+                (df['Account_Type'].astype(str).isin(["Savings", "Call", "Current"])) &
+                (df['Last_Transaction_Date'].notna()) &
+                (df['Last_Transaction_Date'] < threshold_date_5y)
+                ]
+
         count = len(data)
-        desc = f"Demand deposit accounts dormant (>3y inactivity): {count} accounts"
-        return data, count, desc
+        transfer_count = len(transfer_df)
+        desc = f"General accounts (Savings/Call/Current) with no activity (>3y): {count} accounts, ({transfer_count} eligible for Central Bank transfer)"
+        return data, count, desc, transfer_df
     except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Demand Deposit inactivity check: {e})"
+        return pd.DataFrame(), 0, f"(Error in General inactivity check: {e})", pd.DataFrame()
 
 
-def check_bankers_cheques(df, one_year_threshold):
+def check_unreachable_dormant(df):
     """
-    Detects unclaimed bankers cheques, drafts, and cashier orders according to UAE regulations:
-    - Unclaimed for 1+ year from issuance
-    - No claim by beneficiary or customer
+    Detects accounts marked dormant with no contact attempts.
 
     Args:
-        df: DataFrame containing account data
-        one_year_threshold: Date threshold (1 year prior to report date)
+        df (pandas.DataFrame): Account data
 
     Returns:
-        Filtered DataFrame, count, and description
+        tuple: (filtered DataFrame, count, description, transfer_df)
     """
     try:
-        required_columns = [
-            'Account_ID', 'Customer_ID', 'Account_Type',
-            'Unclaimed_Item_Trigger_Date', 'Unclaimed_Item_Amount'
-        ]
+        if not all(col in df.columns for col in
+                   ['Account_Status', 'Email_Contact_Attempt', 'SMS_Contact_Attempt', 'Phone_Call_Attempt']):
+            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Unreachable Dormant check)", pd.DataFrame()
 
-        if not all(col in df.columns for col in required_columns):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Bankers Cheques check)"
-
-        # Convert date columns to datetime if they aren't already
-        date_cols = ['Unclaimed_Item_Trigger_Date']
-        for col in date_cols:
-            if col in df.columns and not pd.api.types.is_datetime64_dtype(df[col]):
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-
-        # Filter unclaimed bankers cheques as per UAE regulation
         data = df[
-            # Account type is Banker's Cheque, Draft, or Cashier's Order
-            (df['Account_Type'].astype(str).str.contains("Cheque|Draft|Order|Cashier", case=False, na=False)) &
-            # Issue date > 1 year ago
-            (df['Unclaimed_Item_Trigger_Date'].notna()) &
-            (df['Unclaimed_Item_Trigger_Date'] < one_year_threshold) &
-            # Has amount
-            (df['Unclaimed_Item_Amount'].notna()) &
-            (df['Unclaimed_Item_Amount'] > 0)
+            (df['Account_Status'].astype(str).str.lower() == 'dormant') &
+            (df['Email_Contact_Attempt'].astype(str).str.lower() == 'no') &
+            (df['SMS_Contact_Attempt'].astype(str).str.lower() == 'no') &
+            (df['Phone_Call_Attempt'].astype(str).str.lower() == 'no')
             ]
-
         count = len(data)
-        desc = f"Unclaimed bankers cheques/drafts/orders (>1y): {count} instruments"
-        return data, count, desc
+        desc = f"Unreachable accounts already marked dormant: {count} accounts"
+        # For unreachable accounts, same df is returned for transfer consideration
+        return data, count, desc, data
     except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Bankers Cheques check: {e})"
+        return pd.DataFrame(), 0, f"(Error in Unreachable dormant check: {e})", pd.DataFrame()
 
 
-def check_transfer_to_central_bank(df, five_year_threshold):
+def convert_foreign_currencies(df):
     """
-    Identifies dormant accounts eligible for transfer to the Central Bank as per UAE regulations:
-    - Dormant for 5+ years from last activity
-    - No other active account with the bank
-    - Current address unknown
+    Convert foreign currencies to AED as per CBUAE regulations.
 
     Args:
-        df: DataFrame containing account data
-        five_year_threshold: Date threshold (5 years prior to report date)
+        df (pandas.DataFrame): Accounts data with balances to be converted
 
     Returns:
-        Filtered DataFrame, count, and description
+        pandas.DataFrame: DataFrame with balances converted to AED
     """
     try:
-        required_columns = [
-            'Account_ID', 'Customer_ID', 'Account_Type',
-            'Date_Last_Cust_Initiated_Activity', 'Date_Last_Customer_Communication_Any_Type',
-            'Customer_Address_Known', 'Customer_Has_Active_Liability_Account',
-            'Customer_Has_Litigation_Regulatory_Reqs'
-        ]
+        # This is a placeholder for the actual conversion logic
+        # In a real implementation, you would:
+        # 1. Check if 'Currency' and 'Balance' columns exist
+        # 2. Get current exchange rates from a reliable source
+        # 3. Convert non-AED balances to AED
 
-        if not all(col in df.columns for col in required_columns):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Central Bank Transfer check)"
+        if not all(col in df.columns for col in ['Currency', 'Balance']):
+            return df
 
-        # Convert date columns to datetime if they aren't already
-        date_cols = ['Date_Last_Cust_Initiated_Activity', 'Date_Last_Customer_Communication_Any_Type']
-        for col in date_cols:
-            if col in df.columns and not pd.api.types.is_datetime64_dtype(df[col]):
-                df[col] = pd.to_datetime(df[col], errors='coerce')
+        # Make a copy to avoid SettingWithCopyWarning
+        result_df = df.copy()
 
-        # Filter accounts eligible for Central Bank transfer
-        data = df[
-            # Not including cheques/drafts - they have their own process
-            (~df['Account_Type'].astype(str).str.contains("Cheque|Draft|Order|Cashier", case=False, na=False)) &
-            # Last activity > 5 years ago
-            ((df['Date_Last_Cust_Initiated_Activity'].isna()) |
-             (df['Date_Last_Cust_Initiated_Activity'] < five_year_threshold)) &
-            # Either no customer communication at all or last communication > 5 years ago
-            ((df['Date_Last_Customer_Communication_Any_Type'].isna()) |
-             (df['Date_Last_Customer_Communication_Any_Type'] < five_year_threshold)) &
-            # Current address not known
-            (~df['Customer_Address_Known'].astype(str).str.lower().isin(['yes', 'true', '1', 'y'])) &
-            # No other active accounts with the bank
-            (~df['Customer_Has_Active_Liability_Account'].astype(str).str.lower().isin(['yes', 'true', '1', 'y'])) &
-            # No litigation or regulatory requirements that would prevent transfer
-            (~df['Customer_Has_Litigation_Regulatory_Reqs'].astype(str).str.lower().isin(['yes', 'true', '1', 'y']))
-            ]
+        # Identify non-AED currencies
+        non_aed = result_df['Currency'] != 'AED'
 
-        count = len(data)
-        desc = f"Accounts eligible for transfer to Central Bank (>5y dormant): {count} accounts"
-        return data, count, desc
+        if non_aed.any():
+            # In a real implementation, you would apply actual conversion rates
+            # This is just a placeholder example
+            result_df.loc[non_aed, 'Balance_AED'] = result_df.loc[non_aed, 'Balance']
+            result_df.loc[~non_aed, 'Balance_AED'] = result_df.loc[~non_aed, 'Balance']
+            result_df['Original_Currency'] = result_df['Currency']
+            result_df['Currency'] = 'AED'
+
+        return result_df
     except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Central Bank Transfer check: {e})"
+        print(f"Error in currency conversion: {e}")
+        return df
 
 
-def check_art3_process_required(df, threshold_date):
+def run_all_dormant_checks(df, threshold_date_3y, threshold_date_5y=None):
     """
-    Identifies accounts that have become dormant but still need to go through
-    the required actions as per Article 3 of the UAE regulations:
-    - Attempts to contact the customer
-    - 3-month waiting period
-    - Transfer to dormant accounts ledger
-
-    Args:
-        df: DataFrame containing account data
-        threshold_date: Date threshold (3 years prior to report date)
-
-    Returns:
-        Filtered DataFrame, count, and description
-    """
-    try:
-        required_columns = [
-            'Account_ID', 'Customer_ID', 'Account_Type',
-            'Date_Last_Cust_Initiated_Activity', 'Date_Last_Customer_Communication_Any_Type',
-            'Bank_Contact_Attempted_Post_Dormancy_Trigger', 'Expected_Account_Dormant'
-        ]
-
-        if not all(col in df.columns for col in required_columns):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Article 3 Process check)"
-
-        # Convert date columns to datetime if they aren't already
-        date_cols = ['Date_Last_Cust_Initiated_Activity', 'Date_Last_Customer_Communication_Any_Type']
-        for col in date_cols:
-            if col in df.columns and not pd.api.types.is_datetime64_dtype(df[col]):
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-
-        # Filter accounts that need Article 3 process
-        data = df[
-            # Account is flagged as dormant
-            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1', 'y'])) &
-            # Last activity > 3 years ago
-            ((df['Date_Last_Cust_Initiated_Activity'] < threshold_date) |
-             (df['Date_Last_Cust_Initiated_Activity'].isna())) &
-            # Either no customer communication at all or last communication > 3 years ago
-            ((df['Date_Last_Customer_Communication_Any_Type'] < threshold_date) |
-             (df['Date_Last_Customer_Communication_Any_Type'].isna())) &
-            # No contact attempt has been made
-            (~df['Bank_Contact_Attempted_Post_Dormancy_Trigger'].astype(str).str.lower().isin(
-                ['yes', 'true', '1', 'y']))
-            ]
-
-        count = len(data)
-        desc = f"Accounts requiring Article 3 process: {count} accounts"
-        return data, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Article 3 Process check: {e})"
-
-
-def check_contact_attempts_needed(df, threshold_date):
-    """
-    Identifies accounts where contact attempts are needed according to UAE regulations.
-
-    Args:
-        df: DataFrame containing account data
-        threshold_date: Date threshold (3 years prior to report date)
-
-    Returns:
-        Filtered DataFrame, count, and description
-    """
-    try:
-        required_columns = [
-            'Account_ID', 'Customer_ID', 'Account_Type',
-            'Date_Last_Cust_Initiated_Activity', 'Date_Last_Customer_Communication_Any_Type',
-            'Bank_Contact_Attempted_Post_Dormancy_Trigger'
-        ]
-
-        if not all(col in df.columns for col in required_columns):
-            return pd.DataFrame(), 0, "(Skipped: Required columns missing for Contact Attempts check)"
-
-        # Convert date columns to datetime if they aren't already
-        date_cols = ['Date_Last_Cust_Initiated_Activity', 'Date_Last_Customer_Communication_Any_Type']
-        for col in date_cols:
-            if col in df.columns and not pd.api.types.is_datetime64_dtype(df[col]):
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-
-        # Calculate when the account may become dormant (2.5 years inactivity)
-        early_warning_threshold = threshold_date + timedelta(days=180)  # 6 months early warning
-
-        # Filter accounts nearing dormancy where contact attempts should be made
-        data = df[
-            # Last activity between 2.5 and 3 years ago
-            (df['Date_Last_Cust_Initiated_Activity'].notna()) &
-            (df['Date_Last_Cust_Initiated_Activity'] < early_warning_threshold) &
-            (df['Date_Last_Cust_Initiated_Activity'] >= threshold_date) &
-            # Last communication between 2.5 and 3 years ago or none
-            ((df['Date_Last_Customer_Communication_Any_Type'].isna()) |
-             ((df['Date_Last_Customer_Communication_Any_Type'] < early_warning_threshold) &
-              (df['Date_Last_Customer_Communication_Any_Type'] >= threshold_date))) &
-            # No contact attempt has been made yet
-            (~df['Bank_Contact_Attempted_Post_Dormancy_Trigger'].astype(str).str.lower().isin(
-                ['yes', 'true', '1', 'y']))
-            ]
-
-        count = len(data)
-        desc = f"Accounts nearing dormancy needing contact attempts: {count} accounts"
-        return data, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Contact Attempts check: {e})"
-
-
-def run_all_dormant_checks(df, report_date=None):
-    """
-    Run all dormant account detection checks as per UAE Central Bank regulations.
+    Run all dormant account detection checks and return a consolidated result.
 
     Args:
         df (pandas.DataFrame): The account data
-        report_date (datetime, optional): Reference date for calculations, defaults to today
+        threshold_date_3y (datetime): 3-year date threshold for initial dormancy
+        threshold_date_5y (datetime, optional): 5-year date threshold for central bank transfer
 
     Returns:
         dict: Dictionary containing results from all dormant checks
     """
-    if report_date is None:
-        report_date = datetime.now()
-
-    # Calculate threshold dates based on UAE Central Bank rules
-    three_year_threshold = report_date - timedelta(days=3 * 365)  # 3 years for standard dormancy
-    one_year_threshold = report_date - timedelta(days=365)  # 1 year for banker's cheques
-    five_year_threshold = report_date - timedelta(days=5 * 365)  # 5 years for Central Bank transfer
-
     results = {
         "total_accounts": len(df),
-        "sd": {"df": None, "count": 0, "desc": ""},  # Safe Deposit
-        "inv": {"df": None, "count": 0, "desc": ""},  # Investment Accounts
-        "fd": {"df": None, "count": 0, "desc": ""},  # Fixed Deposits
-        "dd": {"df": None, "count": 0, "desc": ""},  # Demand Deposits (renamed from gen)
-        "chq": {"df": None, "count": 0, "desc": ""},  # Bankers Cheques
-        "cb": {"df": None, "count": 0, "desc": ""},  # Central Bank Transfer
-        "art3": {"df": None, "count": 0, "desc": ""},  # Article 3 Process Required
-        "con": {"df": None, "count": 0, "desc": ""}  # Contact Attempts Needed
+        "sd": {"df": None, "count": 0, "desc": "", "transfer_df": None},
+        "inv": {"df": None, "count": 0, "desc": "", "transfer_df": None},
+        "fd": {"df": None, "count": 0, "desc": "", "transfer_df": None},
+        "gen": {"df": None, "count": 0, "desc": "", "transfer_df": None},
+        "unr": {"df": None, "count": 0, "desc": "", "transfer_df": None}
     }
 
     # Run each check
-    results["sd"]["df"], results["sd"]["count"], results["sd"]["desc"] = check_safe_deposit(df, three_year_threshold)
-    results["inv"]["df"], results["inv"]["count"], results["inv"]["desc"] = check_investment_inactivity(df,
-                                                                                                        three_year_threshold)
-    results["fd"]["df"], results["fd"]["count"], results["fd"]["desc"] = check_fixed_deposit_inactivity(df,
-                                                                                                        three_year_threshold)
-    results["dd"]["df"], results["dd"]["count"], results["dd"]["desc"] = check_demand_deposit_inactivity(df,
-                                                                                                         three_year_threshold)
-    results["chq"]["df"], results["chq"]["count"], results["chq"]["desc"] = check_bankers_cheques(df,
-                                                                                                  one_year_threshold)
-    results["cb"]["df"], results["cb"]["count"], results["cb"]["desc"] = check_transfer_to_central_bank(df,
-                                                                                                        five_year_threshold)
-    results["art3"]["df"], results["art3"]["count"], results["art3"]["desc"] = check_art3_process_required(df,
-                                                                                                           three_year_threshold)
-    results["con"]["df"], results["con"]["count"], results["con"]["desc"] = check_contact_attempts_needed(df,
-                                                                                                          three_year_threshold)
+    results["sd"]["df"], results["sd"]["count"], results["sd"]["desc"], results["sd"][
+        "transfer_df"] = check_safe_deposit(
+        df, threshold_date_3y, threshold_date_5y)
 
-    # Calculate overall statistics
-    total_dormant = (
-            results["sd"]["count"] + results["inv"]["count"] +
-            results["fd"]["count"] + results["dd"]["count"]
-    )
+    results["inv"]["df"], results["inv"]["count"], results["inv"]["desc"], results["inv"][
+        "transfer_df"] = check_investment_inactivity(
+        df, threshold_date_3y, threshold_date_5y)
 
-    results["statistics"] = {
-        "total_dormant": total_dormant,
-        "dormant_percentage": round((total_dormant / results["total_accounts"]) * 100, 2) if results[
-                                                                                                 "total_accounts"] > 0 else 0,
-        "cb_transfer_percentage": round((results["cb"]["count"] / total_dormant) * 100, 2) if total_dormant > 0 else 0,
-        "unclaimed_instruments": results["chq"]["count"],
-        "report_date": report_date.strftime("%Y-%m-%d")
-    }
+    results["fd"]["df"], results["fd"]["count"], results["fd"]["desc"], results["fd"][
+        "transfer_df"] = check_fixed_deposit_inactivity(
+        df, threshold_date_3y, threshold_date_5y)
+
+    results["gen"]["df"], results["gen"]["count"], results["gen"]["desc"], results["gen"][
+        "transfer_df"] = check_general_inactivity(
+        df, threshold_date_3y, threshold_date_5y)
+
+    results["unr"]["df"], results["unr"]["count"], results["unr"]["desc"], results["unr"][
+        "transfer_df"] = check_unreachable_dormant(df)
+
+    # If we have accounts to transfer, convert any foreign currencies to AED
+    if threshold_date_5y is not None:
+        for check_type in ["sd", "inv", "fd", "gen", "unr"]:
+            if results[check_type]["transfer_df"] is not None and len(results[check_type]["transfer_df"]) > 0:
+                results[check_type]["transfer_df"] = convert_foreign_currencies(results[check_type]["transfer_df"])
 
     return results
+
+
+def prepare_central_bank_transfer(df):
+    """
+    Prepare accounts data for transfer to Central Bank.
+
+    Args:
+        df (pandas.DataFrame): Accounts data ready for transfer
+
+    Returns:
+        pandas.DataFrame: Formatted data for Central Bank reporting
+    """
+    try:
+        # Create a copy to avoid modifying the original DataFrame
+        cb_df = df.copy()
+
+        # Add required fields for Central Bank reporting
+        # These fields are based on the movement form shown in the regulation document
+        cb_df['Transfer_Date'] = datetime.now().strftime('%Y-%m-%d')
+
+        # Format according to BRF (Banking Return Forms) requirements
+        # This is a placeholder for the actual formatting logic
+
+        return cb_df
+    except Exception as e:
+        print(f"Error preparing Central Bank transfer data: {e}")
+        return pd.DataFrame()
+
+
+def identify_high_value_dormant(df, threshold=25000):
+    """Identify dormant accounts with balance >= AED 25,000"""
+    if 'Balance' not in df.columns:
+        return pd.DataFrame(), 0, "Balance column missing"
+
+    high_value = df[df['Balance'] >= threshold]
+    return high_value, len(high_value), f"High-value dormant accounts (≥ AED {threshold}): {len(high_value)}"
+
+
+def detect_post_dormancy_transactions(df, dormant_accounts_df):
+    """Detect transactions occurring after dormancy classification"""
+    if not all(col in df.columns for col in ['Account_Number', 'Transaction_Date']):
+        return pd.DataFrame(), 0, "Required columns missing"
+
+    # Get list of dormant account numbers
+    dormant_numbers = dormant_accounts_df['Account_Number'].unique()
+
+    # Find transactions for these accounts after dormancy date
+    # Note: Would need a 'Dormancy_Date' field to implement properly
+    # This is a conceptual placeholder
+    post_dormancy = df[df['Account_Number'].isin(dormant_numbers)]
+
+    return post_dormancy, len(post_dormancy), f"Accounts with post-dormancy transactions: {len(post_dormancy)}"
+
+
+def check_customer_notifications(df):
+    """Track percentage of dormant accounts where customer was notified"""
+    if 'Customer_Notified' not in df.columns:
+        return 0, "Customer notification tracking not available"
+
+    notified_count = df['Customer_Notified'].sum()
+    percentage = (notified_count / len(df)) * 100 if len(df) > 0 else 0
+
+    return percentage, f"Customer notification rate: {percentage:.2f}%"
+
+
+def track_dormant_to_active(df, history_df):
+    """Track accounts reactivated through valid customer contact"""
+    if not all(col in history_df.columns for col in ['Account_Number', 'Status_Change', 'Change_Date']):
+        return pd.DataFrame(), 0, "Required columns missing from history"
+
+    # Find accounts that changed from dormant to active
+    reactivated = history_df[
+        (history_df['Status_Change'] == 'Dormant to Active')
+    ]
+
+    return reactivated, len(reactivated), f"Accounts reactivated: {len(reactivated)}"
+
+
+def track_manual_overrides(df, audit_df):
+    """Track manually overridden dormancy classifications"""
+    if not all(col in audit_df.columns for col in ['Account_Number', 'Override_Type', 'Approver']):
+        return pd.DataFrame(), 0, "Required audit columns missing"
+
+    # Find manual overrides
+    overrides = audit_df[
+        (audit_df['Override_Type'] == 'Dormancy Classification')
+    ]
+
+    return overrides, len(overrides), f"Manual dormancy overrides: {len(overrides)}"
+
+
+def generate_cbuae_report(results, reporting_date):
+    """Generate regulatory report for CBUAE"""
+    # Create a report dataframe with required metrics
+    report = {
+        'Report_Date': reporting_date,
+        'Total_Dormant_Accounts': sum(results[k]['count'] for k in ['sd', 'inv', 'fd', 'gen', 'unr']),
+        'Total_Dormant_Balance': 0,  # Would need to calculate from account balances
+        'High_Value_Accounts': 0,  # Would need high-value count
+        'Accounts_Eligible_For_Transfer': sum(len(results[k]['transfer_df']) for k in ['sd', 'inv', 'fd', 'gen', 'unr']
+                                              if results[k]['transfer_df'] is not None),
+        'Submission_Days': 0  # Would track days from trigger to submission
+    }
+
+    return pd.DataFrame([report])
+
+
+def calculate_dormancy_percentage(total_dormant, total_accounts):
+    """Calculate dormant accounts as percentage of total customer base"""
+    return (total_dormant / total_accounts) * 100 if total_accounts > 0 else 0

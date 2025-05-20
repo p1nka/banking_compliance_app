@@ -1,11 +1,13 @@
 import streamlit as st
-from ai.chatbot import get_response_and_chart
+import pandas as pd
+from ai.chatbot import get_response_and_chart, display_chat_interface
+from ai.visualizations import generate_plot, create_insights_chart
 from config import SESSION_CHAT_MESSAGES
 
 
 def render_chatbot(df, llm):
     """
-    Render the chatbot UI.
+    Render the enhanced chatbot UI with more visualization capabilities.
 
     Args:
         df (pandas.DataFrame): The account data to analyze
@@ -17,86 +19,208 @@ def render_chatbot(df, llm):
         st.error("No data available. Please upload and process data first.")
         return
 
+    # Display data summary sidebar
+    with st.sidebar:
+        st.subheader("📊 Dataset Overview")
+        st.metric("Total Records", len(df))
+        st.metric("Columns", len(df.columns))
+
+        # Show quick insights if data is available
+        if not df.empty:
+            st.subheader("Quick Insights")
+
+            # Create insight options
+            if st.checkbox("Show Column Statistics"):
+                selected_col = st.selectbox("Select column:", df.columns)
+
+                if selected_col:
+                    col_stats = pd.DataFrame({
+                        'Statistic': ['Count', 'Unique Values', 'Missing Values', 'Top Value'],
+                        'Value': [
+                            len(df[selected_col]),
+                            df[selected_col].nunique(),
+                            df[selected_col].isna().sum(),
+                            str(df[selected_col].value_counts().index[0]) if not df[selected_col].empty else "N/A"
+                        ]
+                    }).set_index('Statistic')
+
+                    st.dataframe(col_stats)
+
+                    # Add quick visualization if appropriate
+                    if df[selected_col].nunique() < 15 and not pd.api.types.is_numeric_dtype(df[selected_col]):
+                        try:
+                            chart = create_insights_chart(
+                                df,
+                                labels=selected_col,
+                                chart_type='pie',
+                                title=f"Distribution of {selected_col}"
+                            )
+                            if chart:
+                                st.plotly_chart(chart, use_container_width=True)
+                        except Exception as e:
+                            st.info(f"Could not create chart: {e}")
+
+            # Add visualization suggestions
+            st.subheader("Visualization Ideas")
+            viz_suggestions = [
+                "Show me a bar chart of account types",
+                "Create a pie chart of dormant vs active accounts",
+                "Plot the distribution of account balances",
+                "Show the timeline of customer last activity dates",
+                "Compare account status across different branches"
+            ]
+
+            if st.button("🔎 Suggest Visualizations"):
+                suggestion = viz_suggestions[hash(df.shape[0]) % len(viz_suggestions)]
+                st.info(f"Try asking: \"{suggestion}\"")
+
+    # Check if LLM is available
     if llm is None:
         st.warning("⚠️ AI Assistant not available. Chat functionality will be limited.")
         st.info(
             "To enable full chatbot functionality, please configure your GROQ API key in secrets.toml or as an environment variable.")
 
-        # Still display a simple input but with limited functionality
-        simple_query = st.text_input("Enter a simple query about the data (basic features only):")
-        if simple_query:
-            st.markdown(f"### Query: {simple_query}")
+        # Offer a simplified view with basic data exploration
+        st.subheader("Basic Data Explorer")
 
-            # Basic dataset info display
-            st.markdown("### Dataset Information")
-            st.write(f"Dataset has {len(df)} rows and {len(df.columns)} columns.")
-            st.write(f"Available columns: {', '.join(df.columns)}")
+        # Simple tab interface for basic exploration
+        basic_tabs = st.tabs(["Data Sample", "Column Info", "Simple Visualizations"])
 
-            # Show a small sample of the data
-            st.markdown("### Data Sample")
-            st.dataframe(df.head(5))
+        with basic_tabs[0]:
+            st.dataframe(df.head(10))
 
-            st.info("For more advanced analysis, please configure the AI Assistant.")
+        with basic_tabs[1]:
+            st.write("### Available Columns")
+            col_info = pd.DataFrame({
+                'Column': df.columns,
+                'Type': df.dtypes,
+                'Non-Null Count': df.count(),
+                'Unique Values': [df[col].nunique() for col in df.columns]
+            })
+            st.dataframe(col_info)
+
+        with basic_tabs[2]:
+            st.write("### Simple Data Visualization")
+            viz_col = st.selectbox("Select a column to visualize:", df.columns)
+            viz_type = st.selectbox("Select visualization type:", ["Bar Chart", "Pie Chart", "Histogram"])
+
+            if viz_col and viz_type:
+                try:
+                    if viz_type == "Bar Chart":
+                        if pd.api.types.is_numeric_dtype(df[viz_col]):
+                            st.warning(f"{viz_col} is numeric. Using histogram instead.")
+                            chart = create_insights_chart(df, labels=viz_col, chart_type='histogram',
+                                                          title=f"Distribution of {viz_col}")
+                        else:
+                            chart = create_insights_chart(df, labels=viz_col, chart_type='bar',
+                                                          title=f"Count of {viz_col}")
+
+                    elif viz_type == "Pie Chart":
+                        if df[viz_col].nunique() > 15:
+                            st.warning(f"Too many unique values in {viz_col} for a pie chart. Showing top 10.")
+                            # Get top 10 values and group the rest as "Other"
+                            top_values = df[viz_col].value_counts().nlargest(10).index
+                            df_temp = df.copy()
+                            df_temp[viz_col] = df_temp[viz_col].apply(lambda x: x if x in top_values else 'Other')
+                            chart = create_insights_chart(df_temp, labels=viz_col, chart_type='pie',
+                                                          title=f"Distribution of {viz_col} (Top 10)")
+                        else:
+                            chart = create_insights_chart(df, labels=viz_col, chart_type='pie',
+                                                          title=f"Distribution of {viz_col}")
+
+                    elif viz_type == "Histogram":
+                        if not pd.api.types.is_numeric_dtype(df[viz_col]):
+                            st.warning(f"{viz_col} is not numeric. Using bar chart instead.")
+                            chart = create_insights_chart(df, labels=viz_col, chart_type='bar',
+                                                          title=f"Count of {viz_col}")
+                        else:
+                            chart = create_insights_chart(df, labels=viz_col, chart_type='histogram',
+                                                          title=f"Distribution of {viz_col}")
+
+                    if chart:
+                        st.plotly_chart(chart, use_container_width=True)
+                    else:
+                        st.error("Could not create visualization.")
+
+                except Exception as viz_error:
+                    st.error(f"Visualization error: {viz_error}")
+
+        st.info("For more advanced analysis and interactive chat, please configure the AI Assistant.")
         return
 
-    # Display chat interface with full functionality
-    st.info("💬 Ask questions or request plots about the **loaded data**.")
+    # Use the imported display_chat_interface function from chatbot.py for the full chat experience
+    display_chat_interface(df, llm)
 
-    # Initialize chat messages if not already in session state
-    if SESSION_CHAT_MESSAGES not in st.session_state:
-        initial_message = f"Hi! I'm your banking compliance assistant. I can answer questions about your data ({len(df)} rows loaded). What would you like to know?"
-        st.session_state[SESSION_CHAT_MESSAGES] = [{"role": "assistant", "content": initial_message}]
+    # Add advanced features section
+    st.subheader("Advanced Features")
+    advanced_expander = st.expander("🔧 Advanced Options", expanded=False)
 
-    # Display chat messages
-    for message in st.session_state[SESSION_CHAT_MESSAGES]:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            # Check if a chart object exists and display it
-            if "chart" in message and message["chart"] is not None:
-                try:
-                    st.plotly_chart(message["chart"], use_container_width=True)
-                except Exception as e:
-                    st.warning(f"Could not display chart: {e}")
+    with advanced_expander:
+        st.write("### Chat History Options")
 
-    # Chat input
-    prompt = st.chat_input(
-        "Ask a question about the loaded data (e.g., 'Show me a bar chart of account types', 'How many dormant accounts?')..."
-    )
+        # Option to clear chat history
+        if st.button("🗑️ Clear Chat History"):
+            if SESSION_CHAT_MESSAGES in st.session_state:
+                initial_message = f"Hi! I'm your banking compliance assistant. Chat history has been cleared. What would you like to know about your data ({len(df)} rows loaded)?"
+                st.session_state[SESSION_CHAT_MESSAGES] = [{"role": "assistant", "content": initial_message}]
+                st.success("Chat history cleared!")
+                st.experimental_rerun()
 
-    if prompt:
-        # Add user message to chat history
-        st.session_state[SESSION_CHAT_MESSAGES].append({"role": "user", "content": prompt})
+        # Option to export chat
+        if SESSION_CHAT_MESSAGES in st.session_state and len(st.session_state[SESSION_CHAT_MESSAGES]) > 1:
+            chat_text = "\n\n".join([
+                f"**{msg['role'].title()}**: {msg['content']}"
+                for msg in st.session_state[SESSION_CHAT_MESSAGES]
+            ])
 
-        # Display user message
-        with st.chat_message("user"):
-            st.markdown(prompt)
+            st.download_button(
+                label="📥 Export Chat History",
+                data=chat_text,
+                file_name=f"banking_compliance_chat_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.md",
+                mime="text/markdown"
+            )
 
-        # Get and display assistant response (text + optional chart)
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                try:
-                    # Handle any errors during response generation
-                    response_text, chart_obj = get_response_and_chart(prompt, df, llm)
+        # Add sample question suggestions
+        st.write("### Sample Questions")
+        question_categories = {
+            "Data Exploration": [
+                "What's the distribution of account types in the data?",
+                "How many dormant accounts do we have?",
+                "What's the average balance of dormant accounts?"
+            ],
+            "Visualizations": [
+                "Show me a pie chart of account statuses",
+                "Create a histogram of account balances",
+                "Generate a bar chart of account types by dormancy status"
+            ],
+            "Compliance Analysis": [
+                "Which accounts haven't had activity in more than 2 years?",
+                "What percentage of accounts are flagged for compliance review?",
+                "Show accounts with incomplete contact attempts"
+            ]
+        }
 
-                    # Display the response
-                    st.markdown(response_text)
+        question_category = st.selectbox("Select a category:", list(question_categories.keys()))
 
-                    # Display chart if available
-                    if chart_obj is not None:
-                        try:
-                            st.plotly_chart(chart_obj, use_container_width=True)
-                        except Exception as chart_e:
-                            st.warning(f"Could not display generated chart: {chart_e}")
+        if question_category:
+            questions = question_categories[question_category]
+            selected_question = st.selectbox("Select a sample question:", questions)
 
-                except Exception as e:
-                    # Handle any unexpected errors
-                    error_msg = f"I encountered an error while processing your request: {str(e)}"
-                    st.error(error_msg)
-                    response_text = error_msg
-                    chart_obj = None
+            if st.button("Ask Selected Question"):
+                # Add to session state so the chat interface will pick it up
+                if SESSION_CHAT_MESSAGES in st.session_state:
+                    st.session_state[SESSION_CHAT_MESSAGES].append({"role": "user", "content": selected_question})
+                    st.experimental_rerun()
 
-        # Add assistant response (and chart) to chat history
-        assistant_response = {"role": "assistant", "content": response_text}
-        if chart_obj is not None:
-            assistant_response["chart"] = chart_obj  # Store the chart object
-        st.session_state[SESSION_CHAT_MESSAGES].append(assistant_response)
+    # Add helpful tips section at the bottom
+    with st.expander("📝 Tips for using the chatbot", expanded=False):
+        st.markdown("""
+        ### How to get the best results from the AI Chatbot:
+
+        - Be specific in your questions (e.g., "How many accounts with balance over $1000 are dormant?" instead of "Tell me about dormant accounts")
+        - For visualizations, specify the chart type and data you want to see (e.g., "Create a bar chart showing account types")
+        - You can ask for analysis like "Compare active vs dormant accounts by balance"
+        - Use the chat history to build on previous questions
+        - If you get an error, try rephrasing your question
+        - The AI works best with the data columns available - check the dataset overview if unsure
+        """)

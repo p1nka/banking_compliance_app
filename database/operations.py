@@ -265,3 +265,169 @@ def log_flag_instructions(account_ids, flag_instruction, days_threshold=None):
 
     except Exception as e:
         return False, f"Error logging flags: {str(e)}"
+
+
+# database/operations.py
+"""
+Database operations for SQL Bot and Dormant Account Analyzer.
+"""
+
+import pandas as pd
+import json
+from datetime import datetime
+from database.connection import get_db_connection
+
+
+def save_sql_query_to_history(natural_language_query, sql_query):
+    """
+    Save a SQL query and its natural language equivalent to history.
+
+    Args:
+        natural_language_query (str): The original natural language question
+        sql_query (str): The generated SQL query
+
+    Returns:
+        bool: True if the save was successful, False otherwise
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+
+        cursor = conn.cursor()
+
+        # Create history table if it doesn't exist
+        cursor.execute("""
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'sql_query_history')
+        BEGIN
+            CREATE TABLE sql_query_history (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                natural_language_query NVARCHAR(MAX),
+                sql_query NVARCHAR(MAX),
+                timestamp DATETIME DEFAULT GETDATE()
+            )
+        END
+        """)
+
+        # Insert the new query
+        cursor.execute("""
+                       INSERT INTO sql_query_history (natural_language_query, sql_query)
+                       VALUES (?, ?)
+                       """, (natural_language_query, sql_query))
+
+        conn.commit()
+        cursor.close()
+
+        return True
+    except Exception as e:
+        print(f"Error saving SQL query to history: {e}")
+        return False
+
+
+def get_recent_sql_history(limit=10):
+    """
+    Get the most recent SQL queries from history.
+
+    Args:
+        limit (int): Maximum number of queries to return
+
+    Returns:
+        pandas.DataFrame: DataFrame containing the history, or None if error
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+
+        # Query the history table
+        query = f"""
+        SELECT TOP {limit} id, natural_language_query, sql_query, timestamp
+        FROM sql_query_history
+        ORDER BY timestamp DESC
+        """
+
+        df = pd.read_sql(query, conn)
+        return df
+    except Exception as e:
+        print(f"Error retrieving SQL history: {e}")
+        return None
+
+
+def save_dormant_analysis_to_history(parameters, count):
+    """
+    Save dormant account analysis parameters and results to history.
+
+    Args:
+        parameters (dict): The analysis parameters
+        count (int): Number of dormant accounts found
+
+    Returns:
+        bool: True if the save was successful, False otherwise
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+
+        cursor = conn.cursor()
+
+        # Create history table if it doesn't exist
+        cursor.execute("""
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'dormant_analysis_history')
+        BEGIN
+            CREATE TABLE dormant_analysis_history (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                parameters NVARCHAR(MAX),
+                count INT,
+                timestamp DATETIME DEFAULT GETDATE()
+            )
+        END
+        """)
+
+        # Convert parameters dict to JSON string
+        params_json = json.dumps(parameters)
+
+        # Insert the new analysis
+        cursor.execute("""
+                       INSERT INTO dormant_analysis_history (parameters, count)
+                       VALUES (?, ?)
+                       """, (params_json, count))
+
+        conn.commit()
+        cursor.close()
+
+        return True
+    except Exception as e:
+        print(f"Error saving dormant analysis to history: {e}")
+        return False
+
+
+def get_recent_dormant_analysis(limit=10):
+    """
+    Get the most recent dormant account analyses from history.
+
+    Args:
+        limit (int): Maximum number of analyses to return
+
+    Returns:
+        pandas.DataFrame: DataFrame containing the history, or None if error
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+
+        # Query the history table
+        query = f"""
+        SELECT TOP {limit} id, parameters, count, timestamp
+        FROM dormant_analysis_history
+        ORDER BY timestamp DESC
+        """
+
+        df = pd.read_sql(query, conn)
+        return df
+    except Exception as e:
+        print(f"Error retrieving dormant analysis history: {e}")
+        return None
+
+# Add any additional database operations needed for your application here

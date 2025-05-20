@@ -1,3 +1,8 @@
+# database/connection.py
+"""
+Database connection handling for the application.
+"""
+
 import os
 import pyodbc
 import streamlit as st
@@ -197,6 +202,35 @@ def get_db_connection():
         return None
 
 
+def get_direct_connection(file_path):
+    """
+    Create a direct connection to a database file.
+
+    Args:
+        file_path (str): Path to the database file
+
+    Returns:
+        pyodbc.Connection: A database connection or None if connection failed
+    """
+    try:
+        # Determine connection string based on file extension
+        if file_path.lower().endswith(".mdb") or file_path.lower().endswith(".accdb"):
+            # Access database
+            conn_string = f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={file_path}"
+        elif file_path.lower().endswith(".csv"):
+            # CSV file - handle differently, perhaps return a special connector or loader
+            return None  # Implement CSV handling separately
+        else:
+            # Assume SQL Server compatible file
+            conn_string = f"DRIVER={{ODBC Driver 18 for SQL Server}};AttachDbFilename={file_path};Database=tempdb;Trusted_Connection=Yes"
+
+        conn = pyodbc.connect(conn_string)
+        return conn
+    except Exception as e:
+        print(f"Direct database connection error: {e}")
+        return None
+
+
 def close_all_connections():
     """
     Closes all database connections in the pool.
@@ -242,16 +276,3 @@ def ping_connections():
                 except:
                     pass
                 CONNECTION_POOL[conn_key] = None
-
-
-# Register a Streamlit lifecycle handler to close connections when the app is done
-def on_shutdown():
-    """Close all connections when the app is shutting down."""
-    close_all_connections()
-
-
-# Register the handler if in main session
-if __name__ == "__main__":
-    import atexit
-
-    atexit.register(on_shutdown)

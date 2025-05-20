@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import re
+import time
+from datetime import datetime
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -8,7 +10,7 @@ from config import DB_NAME, DB_SERVER
 from database.connection import get_db_connection
 from database.schema import get_db_schema
 from database.operations import save_sql_query_to_history, get_recent_sql_history
-from ai.llm import SQL_GENERATION_PROMPT, SQL_EXPLANATION_PROMPT, get_fallback_response
+from ai.llm import SQL_GENERATION_PROMPT, SQL_EXPLANATION_PROMPT
 
 
 def render_sqlbot(llm):
@@ -20,47 +22,59 @@ def render_sqlbot(llm):
     """
     st.header("SQL Database Query Bot")
 
-    # Check if there's an active database connection
-    if "db_connection" in st.session_state and st.session_state["db_connection"]:
-        conn = st.session_state["db_connection"]
-        is_direct_connection = True
-        selected_table = st.session_state.get("sql_table_schema", "Unknown table")
-        st.info(f"🔗 Connected directly to database. Loaded table: **{selected_table}**")
-    else:
-        # Fall back to default connection
-        conn = get_db_connection()
-        is_direct_connection = False
-        st.info(
-            f"🤖 This bot queries the **default database**: `{DB_NAME}` on server `{DB_SERVER}` as configured via secrets/environment variables.")
+    # Store LLM availability in session state
+    st.session_state.llm_available = llm is not None
+    if llm is not None:
+        st.session_state.llm_instance = llm
 
-    # Check if connection was successful
+    # Explicitly state which database is being queried
+    st.info(
+        f"🤖 This bot queries the **default database**: `{DB_NAME}` on server `{DB_SERVER}` as configured via secrets/environment variables.")
+    st.caption("*(This is separate from the 'Load Data' feature, which brings data into the app's memory.)*")
+
+    # Check prerequisites
+    conn = get_db_connection()
     if conn is None:
-        st.warning("Cannot use SQL Bot: Database connection failed.")
+        st.warning("Cannot use SQL Bot: Default database connection failed.")
         return
 
-    # Check if LLM is available
+    # Fetch schema for the default database
+    schema = get_db_schema()
+    # Store schema in session state for query explanation
+    if schema:
+        schema_text = "Database Schema for SQL Bot:\n"
+        for table, columns_list in schema.items():
+            schema_text += f"Table: {table}\nColumns:\n{chr(10).join([f'- {name} ({dtype})' for name, dtype in columns_list])}\n\n"
+        st.session_state.db_schema = schema_text
+
+    # Manual SQL mode if LLM is not available
     if not llm:
         st.warning(
             "AI Assistant (Groq/Langchain) is not available. SQL Bot will run in basic mode with limited functionality.")
         # Provide a simple SQL editor as fallback
         st.subheader("Manual SQL Query")
-
-        # If directly connected, suggest the loaded table
-        default_query = f"SELECT TOP 10 * FROM {st.session_state.get('sql_table_schema', 'accounts_data')}" if is_direct_connection else "SELECT TOP 10 * FROM accounts_data"
-
         manual_sql = st.text_area(
             "Enter SQL query:",
-            value=default_query,
+            value="SELECT TOP 10 * FROM accounts_data",
             height=150
         )
 
         if st.button("Execute Query", key="execute_manual_sql"):
-            # Clean the SQL query to prevent syntax errors
-            clean_sql = clean_sql_query(manual_sql)
-
             try:
                 with st.spinner("Executing query..."):
-                    results_df = pd.read_sql(clean_sql, conn)
+                    start_time = time.time()
+                    results_df = pd.read_sql(manual_sql, conn)
+                    execution_time = round(time.time() - start_time, 3)
+
+                    # Add to query history using new function
+                    add_query_to_history(
+                        query=manual_sql,
+                        results=results_df,
+                        explanation="Query executed manually.",
+                        error=None,
+                        ai_generated=False,
+                        execution_time=execution_time
+                    )
 
                 st.subheader("Query Results")
                 if not results_df.empty:
@@ -79,53 +93,29 @@ def render_sqlbot(llm):
                     st.info("Query executed successfully but returned no results.")
             except Exception as e:
                 st.error(f"Query execution error: {e}")
+                # Add failed query to history
+                add_query_to_history(
+                    query=manual_sql,
+                    results=None,
+                    explanation=None,
+                    error=str(e),
+                    ai_generated=False
+                )
 
         # Show query history
         show_query_history()
         return
 
-    # Get database schema
-    if is_direct_connection:
-        # If using direct connection, create schema info from the current table
-        try:
-            # Get table structure
-            cursor = conn.cursor()
-            # Use SQL Server's method to get column info
-            cursor.execute(
-                f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{selected_table}'")
-            columns = cursor.fetchall()
-
-            if not columns:
-                st.warning(f"Could not retrieve schema information for table '{selected_table}'")
-                schema = None
-            else:
-                # Create schema dictionary with just the loaded table
-                schema = {
-                    selected_table: [(col[0], col[1]) for col in columns]
-                }
-
-            cursor.close()
-        except Exception as e:
-            st.warning(f"Could not retrieve schema: {e}")
-            schema = None
-    else:
-        # Using default connection, get full schema
-        schema = get_db_schema()
-
+    # AI-assisted mode
     if schema:
-        # Format schema as text for display and prompts
-        schema_text = "Database Schema for SQL Bot:\n"
-        for table, columns_list in schema.items():
-            schema_text += f"Table: {table}\nColumns:\n{chr(10).join([f'- {name} ({dtype})' for name, dtype in columns_list])}\n\n"
-
-        with st.expander("Show Database Schema"):
+        # Display schema
+        with st.expander("Show Database Schema (from default DB)"):
             st.code(schema_text, language='text')
 
         # SQL Bot UI components
         nl_query_sqlbot = st.text_area(
             "Ask a database question:",
-            placeholder=f"e.g., How many accounts in '{selected_table}' have been inactive for more than 3 years?" if is_direct_connection
-            else "e.g., How many dormant accounts in 'Dubai' branch from the 'accounts_data' table?",
+            placeholder="e.g., How many dormant accounts in 'Dubai' branch from the 'accounts_data' table?",
             height=100,
             key="sql_bot_nl_query_input"
         )
@@ -142,14 +132,7 @@ def render_sqlbot(llm):
             # Generate SQL
             try:
                 with st.spinner("🤖 Converting natural language to SQL..."):
-                    # If direct connection, make sure the model specifically uses the loaded table
-                    if is_direct_connection:
-                        nl_to_sql_prompt = PromptTemplate.from_template(
-                            SQL_GENERATION_PROMPT + f"\n\nIMPORTANT: The user is currently viewing the '{selected_table}' table specifically, so ensure your SQL query focuses on this table."
-                        )
-                    else:
-                        nl_to_sql_prompt = PromptTemplate.from_template(SQL_GENERATION_PROMPT)
-
+                    nl_to_sql_prompt = PromptTemplate.from_template(SQL_GENERATION_PROMPT)
                     nl_to_sql_chain = nl_to_sql_prompt | llm | StrOutputParser()
 
                     sql_query_raw = nl_to_sql_chain.invoke({
@@ -157,8 +140,17 @@ def render_sqlbot(llm):
                         "question": nl_query_sqlbot.strip()
                     })
 
-                    # Clean up the generated SQL with improved extraction
-                    sql_query_generated = clean_sql_query(sql_query_raw)
+                    # Clean up the generated SQL
+                    # Look for SELECT statement
+                    match = re.search(r"SELECT.*", sql_query_raw, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        sql_query_generated = match.group(0).strip()
+                    else:
+                        # Fallback to standard cleaning if SELECT is not found explicitly by regex
+                        sql_query_generated_fallback = re.sub(r"^```sql\s*|\s*```$", "", sql_query_raw,
+                                                              flags=re.MULTILINE).strip()
+                        st.warning("Could not find SELECT clearly with regex. Using fallback cleaning.")
+                        sql_query_generated = sql_query_generated_fallback
 
                     # Validate the generated query is a SELECT statement
                     if not sql_query_generated or not sql_query_generated.lower().strip().startswith("select"):
@@ -178,9 +170,11 @@ def render_sqlbot(llm):
                 try:
                     with st.spinner("⏳ Executing query..."):
                         # Use pandas to read and display the results
+                        start_time = time.time()
                         results_df = pd.read_sql(sql_query_generated, conn)
+                        execution_time = round(time.time() - start_time, 3)
 
-                    # Save query to history
+                    # Save query to database history
                     try:
                         if save_sql_query_to_history(nl_query_sqlbot, sql_query_generated):
                             st.success("Query saved to history.")
@@ -189,93 +183,22 @@ def render_sqlbot(llm):
                     except Exception as e:
                         st.warning(f"Error saving to history: {e}")
 
+                    # Add to session history for current session
+                    add_query_to_history(
+                        query=sql_query_generated,
+                        results=results_df,
+                        explanation=f"Generated from: '{nl_query_sqlbot}'",
+                        error=None,
+                        ai_generated=True,
+                        execution_time=execution_time,
+                        nl_query=nl_query_sqlbot
+                    )
+
                     # Display results
                     st.subheader("Query Results")
                     if not results_df.empty:
                         st.dataframe(results_df)
                         st.info(f"Query returned {len(results_df)} rows.")
-
-                        # Add visualization options for certain types of results
-                        if len(results_df.columns) >= 2 and len(results_df) > 0 and len(results_df) <= 50:
-                            try:
-                                import plotly.express as px
-
-                                # Check for numeric columns that might be good for visualization
-                                numeric_cols = results_df.select_dtypes(include=['number']).columns.tolist()
-                                all_cols = results_df.columns.tolist()
-
-                                if numeric_cols and len(all_cols) >= 2:
-                                    st.subheader("Visualize Results")
-
-                                    col1, col2 = st.columns(2)
-
-                                    with col1:
-                                        chart_type = st.selectbox(
-                                            "Chart Type",
-                                            ["Bar Chart", "Line Chart", "Scatter Plot", "Pie Chart", "Box Plot"],
-                                            key="vis_chart_type"
-                                        )
-
-                                    with col2:
-                                        # For some charts, we need a categorical column for x-axis
-                                        if chart_type in ["Bar Chart", "Line Chart", "Scatter Plot"]:
-                                            x_col = st.selectbox("X-Axis", all_cols, key="vis_x_col")
-                                            y_col = st.selectbox("Y-Axis", numeric_cols, key="vis_y_col")
-
-                                            if st.button("Generate Chart", key="gen_chart_btn"):
-                                                try:
-                                                    if chart_type == "Bar Chart":
-                                                        fig = px.bar(results_df, x=x_col, y=y_col,
-                                                                     title=f"{y_col} by {x_col}")
-                                                    elif chart_type == "Line Chart":
-                                                        fig = px.line(results_df, x=x_col, y=y_col,
-                                                                      title=f"{y_col} Trend by {x_col}")
-                                                    elif chart_type == "Scatter Plot":
-                                                        fig = px.scatter(results_df, x=x_col, y=y_col,
-                                                                         title=f"{y_col} vs {x_col}")
-
-                                                    st.plotly_chart(fig, use_container_width=True)
-                                                except Exception as viz_e:
-                                                    st.error(f"Visualization error: {viz_e}")
-
-                                        # For pie charts
-                                        elif chart_type == "Pie Chart":
-                                            values_col = st.selectbox("Values", numeric_cols, key="vis_values_col")
-                                            names_col = st.selectbox("Names", all_cols, key="vis_names_col")
-
-                                            if st.button("Generate Chart", key="gen_pie_btn"):
-                                                try:
-                                                    fig = px.pie(results_df, values=values_col, names=names_col,
-                                                                 title=f"{values_col} Distribution")
-                                                    st.plotly_chart(fig, use_container_width=True)
-                                                except Exception as viz_e:
-                                                    st.error(f"Visualization error: {viz_e}")
-
-                                        # For box plots
-                                        elif chart_type == "Box Plot":
-                                            y_col = st.selectbox("Value Column", numeric_cols, key="vis_box_y_col")
-
-                                            # Group by is optional
-                                            use_grouping = st.checkbox("Group by category", key="vis_use_grouping")
-                                            if use_grouping:
-                                                x_col = st.selectbox("Group by", all_cols, key="vis_box_x_col")
-                                                if st.button("Generate Chart", key="gen_box_btn"):
-                                                    try:
-                                                        fig = px.box(results_df, y=y_col, x=x_col,
-                                                                     title=f"{y_col} Distribution by {x_col}")
-                                                        st.plotly_chart(fig, use_container_width=True)
-                                                    except Exception as viz_e:
-                                                        st.error(f"Visualization error: {viz_e}")
-                                            else:
-                                                if st.button("Generate Chart", key="gen_box_simple_btn"):
-                                                    try:
-                                                        fig = px.box(results_df, y=y_col, title=f"{y_col} Distribution")
-                                                        st.plotly_chart(fig, use_container_width=True)
-                                                    except Exception as viz_e:
-                                                        st.error(f"Visualization error: {viz_e}")
-                            except Exception as pkg_e:
-                                st.info(
-                                    "Visualization options not available. Please install plotly for visualization features.")
 
                         # CSV download button for results
                         csv_data = results_df.to_csv(index=False).encode('utf-8')
@@ -290,6 +213,15 @@ def render_sqlbot(llm):
 
                 except Exception as e:
                     st.error(f"Query execution error: {e}")
+                    # Add failed query to history
+                    add_query_to_history(
+                        query=sql_query_generated,
+                        results=None,
+                        explanation=f"Generated from: '{nl_query_sqlbot}'",
+                        error=str(e),
+                        ai_generated=True,
+                        nl_query=nl_query_sqlbot
+                    )
 
         # Store in session state for later use
         if 'last_nl_query_sqlbot' not in st.session_state:
@@ -315,11 +247,20 @@ def render_sqlbot(llm):
                         })
                         st.subheader("Query Analysis")
                         st.markdown(explanation)
+
+                        # Update the most recent query history item with the explanation
+                        if 'query_history' in st.session_state and st.session_state.query_history:
+                            st.session_state.query_history[0]['explanation'] = explanation
+
                 except Exception as e:
                     st.error(f"Query explanation error: {e}")
                     fallback_explanation = get_fallback_response("sql_explanation")
                     st.warning("Using fallback explanation due to AI error.")
                     st.markdown(fallback_explanation)
+
+                    # Update with fallback explanation
+                    if 'query_history' in st.session_state and st.session_state.query_history:
+                        st.session_state.query_history[0]['explanation'] = fallback_explanation
 
         # Show query history
         show_query_history()
@@ -327,57 +268,211 @@ def render_sqlbot(llm):
         st.warning("Could not retrieve database schema. SQL Bot is limited.")
 
 
-def clean_sql_query(raw_sql):
+def show_query_history():
     """
-    Clean and extract SQL query from raw text.
-    Handles various formats including markdown code blocks and backticks.
-    Properly escapes quotes for SQL Server compatibility.
+    Display the history of SQL queries executed in the application.
+    Shows both session history and database history.
+    """
+    st.subheader("Query History")
+
+    # Create tabs for different history views
+    history_tabs = st.tabs(["Session History", "Database History"])
+
+    # Tab 1: Session History (using the new approach)
+    with history_tabs[0]:
+        # Initialize query history in session state if it doesn't exist
+        if 'query_history' not in st.session_state:
+            st.session_state.query_history = []
+
+        # Check if there's any history to display
+        if st.session_state.query_history:
+            # Simple filter option
+            filter_type = st.selectbox(
+                "Filter queries:",
+                ["All Queries", "Successful", "Failed", "AI Generated", "Manual"],
+                key="filter_session_history"
+            )
+
+            # Filter the history based on selection
+            filtered_history = st.session_state.query_history
+
+            if filter_type == "Successful":
+                filtered_history = [q for q in filtered_history if not q.get('error')]
+            elif filter_type == "Failed":
+                filtered_history = [q for q in filtered_history if q.get('error')]
+            elif filter_type == "AI Generated":
+                filtered_history = [q for q in filtered_history if q.get('ai_generated', False)]
+            elif filter_type == "Manual":
+                filtered_history = [q for q in filtered_history if not q.get('ai_generated', False)]
+
+            # Display each query in the history
+            for i, query_item in enumerate(filtered_history):
+                # Create a readable title for the expander
+                query_title = f"Query #{i + 1}"
+                if 'timestamp' in query_item:
+                    query_title += f" - {query_item['timestamp']}"
+
+                # Add icons based on query status and type
+                if query_item.get('ai_generated', False):
+                    query_title = "🤖 " + query_title
+                else:
+                    query_title = "✏️ " + query_title
+
+                if query_item.get('error'):
+                    query_title = "❌ " + query_title
+                else:
+                    query_title = "✅ " + query_title
+
+                # Create an expander for each query
+                with st.expander(query_title):
+                    # Create tabs for query details
+                    query_tabs = st.tabs(["Query", "Results", "Details"])
+
+                    with query_tabs[0]:  # Query tab
+                        # Show NL query if available
+                        if 'nl_query' in query_item and query_item['nl_query']:
+                            st.markdown("**Natural Language Query:**")
+                            st.write(query_item['nl_query'])
+                            st.markdown("---")
+
+                        st.markdown("**SQL Query:**")
+                        st.code(query_item.get('query', 'No query available'), language='sql')
+
+                        # Add copy button functionality
+                        if st.button("📋 Copy SQL", key=f"copy_btn_{i}"):
+                            st.code(query_item.get('query', ''))
+                            st.success("SQL copied! Use the copy button in the code block above.")
+
+                        # Add re-run button
+                        if st.button("🔄 Re-run Query", key=f"rerun_btn_{i}"):
+                            st.session_state.sql_query = query_item.get('query', '')
+
+                    with query_tabs[1]:  # Results tab
+                        if 'error' in query_item and query_item['error']:
+                            st.error(f"Error: {query_item['error']}")
+                        elif 'results' in query_item and query_item['results'] is not None:
+                            # Check if results is a DataFrame
+                            if isinstance(query_item['results'], pd.DataFrame):
+                                if not query_item['results'].empty:
+                                    st.dataframe(query_item['results'], use_container_width=True)
+
+                                    # Add download button for CSV
+                                    csv_data = query_item['results'].to_csv(index=False).encode('utf-8')
+                                    st.download_button(
+                                        label="📥 Download as CSV",
+                                        data=csv_data,
+                                        file_name=f"query_results_{i}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                        mime="text/csv",
+                                        key=f"download_btn_{i}"
+                                    )
+                                else:
+                                    st.info("Query returned no results.")
+                            else:
+                                st.write(query_item['results'])
+                        else:
+                            st.info("No results available.")
+
+                    with query_tabs[2]:  # Details tab
+                        st.markdown("**Query Details:**")
+                        st.text(f"Timestamp: {query_item.get('timestamp', 'N/A')}")
+                        st.text(f"Execution time: {query_item.get('execution_time', 'N/A')} seconds")
+                        st.text(f"Generated by: {'AI Assistant' if query_item.get('ai_generated', False) else 'User'}")
+
+                        if 'row_count' in query_item:
+                            st.text(f"Rows returned: {query_item.get('row_count', 0)}")
+
+                        # Show explanation if available
+                        if 'explanation' in query_item and query_item['explanation']:
+                            st.markdown("**Query Explanation:**")
+                            st.write(query_item['explanation'])
+        else:
+            # Display a message if no queries have been run
+            st.info("No SQL queries have been executed in this session yet.")
+
+            # Provide a helpful tip
+            st.write("**Sample SQL queries you can try:**")
+            sample_queries = [
+                "SELECT TOP 10 * FROM accounts_data;",
+                "SELECT account_id, balance FROM accounts_data WHERE balance > 10000;",
+                "SELECT * FROM dormant_flags WHERE last_activity_date < DATEADD(year, -1, GETDATE());"
+            ]
+
+            # Create a horizontal layout for sample queries
+            cols = st.columns(3)
+            for i, query in enumerate(sample_queries):
+                with cols[i % 3]:
+                    if st.button(f"Example {i + 1}", key=f"sample_sql_{i}"):
+                        st.session_state.sql_query = query
+
+    # Tab 2: Database History (using the existing implementation)
+    with history_tabs[1]:
+        if st.checkbox("Show Recent SQL Queries from Database", key="show_sql_history_checkbox_sqlbot"):
+            try:
+                history_df = get_recent_sql_history(limit=10)
+
+                if history_df is not None and not history_df.empty:
+                    for _, row in history_df.iterrows():
+                        ts = pd.to_datetime(row['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                        with st.expander(f"Query at {ts}: \"{row['natural_language_query'][:70]}...\""):
+                            st.text_area("Natural Language:", row['natural_language_query'], height=70, disabled=True)
+                            st.code(row['sql_query'], language='sql')
+
+                            # Add re-run button for database history items
+                            if st.button("🔄 Re-run", key=f"rerun_db_{_}"):
+                                st.session_state.sql_query = row['sql_query']
+                        st.markdown("---")  # Separator
+                else:
+                    st.info("No queries in database history yet.")
+            except Exception as e:
+                st.error(f"Error retrieving database history: {e}")
+
+
+def add_query_to_history(query, results=None, explanation=None, error=None, ai_generated=False, execution_time=0.0,
+                         nl_query=None):
+    """
+    Add a query to the session history with all relevant information.
 
     Args:
-        raw_sql (str): The raw SQL query text to clean
-
-    Returns:
-        str: A cleaned SQL query ready for execution
+        query (str): The SQL query text
+        results (pd.DataFrame, optional): Results of the query execution
+        explanation (str, optional): Explanation of the query
+        error (str, optional): Error message if query execution failed
+        ai_generated (bool, optional): Whether the query was generated by AI
+        execution_time (float, optional): Query execution time in seconds
+        nl_query (str, optional): Natural language query that generated this SQL
     """
-    if not raw_sql:
-        return ""
+    # Initialize query history if it doesn't exist
+    if 'query_history' not in st.session_state:
+        st.session_state.query_history = []
 
-    # First, remove any markdown code blocks
-    clean_sql = re.sub(r"```sql\s*|\s*```", "", raw_sql, flags=re.IGNORECASE)
+    # Record current timestamp
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Handle any other code fence markers that might be present
-    clean_sql = re.sub(r"```.*?\s*|\s*```", "", clean_sql, flags=re.IGNORECASE)
+    # Create the query history item
+    query_item = {
+        'query': query,
+        'results': results,
+        'explanation': explanation,
+        'error': error,
+        'timestamp': timestamp,
+        'execution_time': execution_time,
+        'ai_generated': ai_generated
+    }
 
-    # Try to extract a valid SQL statement (SELECT, INSERT, UPDATE, etc.)
-    sql_pattern = re.compile(r"(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|EXEC|EXECUTE).*?(?:;|$)",
-                             re.IGNORECASE | re.DOTALL)
+    # Add natural language query if provided
+    if nl_query:
+        query_item['nl_query'] = nl_query
 
-    match = sql_pattern.search(clean_sql)
-    if match:
-        clean_sql = match.group(0).strip()
+    # Add row count if results is a DataFrame
+    if results is not None and hasattr(results, 'shape'):
+        query_item['row_count'] = results.shape[0]
 
-    # Remove trailing semicolons as they can cause issues with some SQL Server drivers
-    clean_sql = clean_sql.rstrip(';')
+    # Add to history (at the beginning for reverse chronological order)
+    st.session_state.query_history.insert(0, query_item)
 
-    # Handle potential quote issues for SQL Server
-    # This is a potential fix for the 'VIP' issue where nested quotes cause problems
-    clean_sql = clean_sql.replace("''", "'")  # Replace double single quotes with single quotes
+    # Limit history size to prevent memory issues
+    max_history = 50  # Adjust as needed
+    if len(st.session_state.query_history) > max_history:
+        st.session_state.query_history = st.session_state.query_history[:max_history]
 
-    return clean_sql.strip()
-
-
-def show_query_history():
-    """Display the SQL query history."""
-    st.subheader("Query History")
-    if st.checkbox("Show Recent SQL Queries from History", key="show_sql_history_checkbox_sqlbot"):
-        history_df = get_recent_sql_history(limit=10)
-
-        if history_df is not None and not history_df.empty:
-            for _, row in history_df.iterrows():
-                ts = pd.to_datetime(row['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
-                with st.expander(f"Query at {ts}: \"{row['natural_language_query'][:70]}...\""):
-                    st.text_area("Natural Language:", row['natural_language_query'], height=70, disabled=True)
-                    st.code(row['sql_query'], language='sql')
-                st.markdown("---")  # Separator
-        else:
-            st.info("No queries in history yet.")
+    return query_item

@@ -5,7 +5,7 @@ import json
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from config import SESSION_CHAT_MESSAGES, SESSION_COLUMN_MAPPING
-from ai.llm import get_fallback_response
+from ai.llm import generate_sql
 
 
 def get_response_and_chart(user_query, current_data, llm_model):
@@ -17,10 +17,14 @@ def get_response_and_chart(user_query, current_data, llm_model):
     chart = None
     response_text = "Sorry, something went wrong processing your request."  # Default error message
 
-    if not llm_model:
-        return "⚠️ AI Assistant not available (check API key or install Langchain). Cannot process dynamic requests.", None
+    if llm_model is None:
+        # --- FALLBACK LOGIC ---
+        # If the LLM is not available, provide a generic fallback response
+        chatbot_response = "AI features are disabled. Please check the application's API key configuration or installation."
+        chart_data = None  # Or some default/empty chart data
 
-    if current_data is None or current_data.empty:
+    else:
+      if current_data is None or current_data.empty:
         return "⚠️ No data loaded. Please upload and process data first.", None
 
     # --- Prepare Context for LLM ---
