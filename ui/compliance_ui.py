@@ -4,18 +4,18 @@ import pandas as pd
 # Assuming your backend compliance.py is in an 'agents' directory
 from agents.compliance import (
     run_all_compliance_checks,
-    detect_incomplete_contact,
+    detect_incomplete_contact_attempts,
     detect_flag_candidates,
-    log_flag_instructions,  # Important for the flag candidates agent
+    log_flag_instructions,
     detect_ledger_candidates,
     detect_freeze_candidates,
-    detect_transfer_candidates_to_cb,  # Renamed from detect_transfer_candidates
-    detect_foreign_currency_conversion_needed,  # Renamed
-    detect_sdb_court_application_needed,  # Renamed from detect_safe_deposit_boxes
-    detect_unclaimed_payment_instruments_ledger,  # Renamed
-    detect_claim_processing_pending,  # Renamed from detect_claim_candidates
-    generate_annual_cbuae_report_summary,  # Renamed
-    check_record_retention_compliance  # Renamed
+    detect_transfer_candidates_to_cb,
+    detect_foreign_currency_conversion_needed,
+    detect_sdb_court_application_needed,
+    detect_unclaimed_payment_instruments_ledger,
+    detect_claim_processing_pending,
+    generate_annual_cbuae_report_summary,
+    check_record_retention_compliance
 )
 # Assuming these utility modules exist
 from data.exporters import download_pdf_button, download_csv_button
@@ -72,9 +72,18 @@ def render_compliance_analyzer(df, agent_name_input, llm):
 def render_summarized_compliance_audit_view(df, agent_name_input, llm):
     st.subheader("📈 Summarized Compliance Audit Results")
 
+    # Get the threshold dates from session state
+    general_threshold_date = st.session_state.get("general_threshold_date",
+                                                  datetime.now() - timedelta(days=1095))  # Default 3 years
+    freeze_threshold_date = st.session_state.get("freeze_threshold_date",
+                                                 datetime.now() - timedelta(days=1095))  # Default 3 years
+
     if st.button("🚀 Run Summarized Compliance Audit", key="run_summary_compliance_audit_button"):
         with st.spinner("Running all compliance audit checks..."):
-            results = run_all_compliance_checks(df.copy(), agent_name=agent_name_input)
+            results = run_all_compliance_checks(df.copy(),
+                                                general_threshold_date=general_threshold_date,
+                                                freeze_threshold_date=freeze_threshold_date,
+                                                agent_name=agent_name_input)
         st.session_state.compliance_summary_results_ui = results
         st.toast("Summarized compliance audit complete!", icon="✅")
 
@@ -167,11 +176,16 @@ def render_summarized_compliance_audit_view(df, agent_name_input, llm):
 # --- Individual Agent View ---
 def render_individual_compliance_agent_view(df, selected_agent_key, agent_name_input, llm):
     st.subheader(f"🔍 Results for: {selected_agent_key}")
-    three_years_ago = datetime.now() - timedelta(days=3 * 365)  # For agents needing this
+
+    # Get the threshold dates from session state
+    general_threshold_date = st.session_state.get("general_threshold_date",
+                                                  datetime.now() - timedelta(days=1095))  # Default 3 years
+    freeze_threshold_date = st.session_state.get("freeze_threshold_date",
+                                                 datetime.now() - timedelta(days=1095))  # Default 3 years
 
     # Agent mapping (key from dropdown to function and description)
     agent_functions_compliance = {
-        "CONTACT: Incomplete Contact Attempts": (detect_incomplete_contact,
+        "CONTACT: Incomplete Contact Attempts": (detect_incomplete_contact_attempts,
                                                  "Detects accounts with incomplete contact attempts (Art. 3.1)."),
         "FLAG: Flag Candidates (Not Yet Flagged)": (detect_flag_candidates,
                                                     "Detects accounts inactive over threshold, not yet flagged dormant (Art. 2)."),
@@ -209,9 +223,9 @@ def render_individual_compliance_agent_view(df, selected_agent_key, agent_name_i
         try:
             # Call the specific agent function with appropriate arguments
             if selected_agent_key == "FLAG: Flag Candidates (Not Yet Flagged)":
-                data_filtered, count, agent_run_desc = agent_func(df.copy(), three_years_ago)
+                data_filtered, count, agent_run_desc = agent_func(df.copy(), general_threshold_date)
             elif selected_agent_key == "FREEZE: Statement Freeze Needed (Art. 7.3)":
-                data_filtered, count, agent_run_desc = agent_func(df.copy(), three_years_ago)
+                data_filtered, count, agent_run_desc = agent_func(df.copy(), freeze_threshold_date)
             elif selected_agent_key == "RETENTION: Record Retention Compliance":
                 data_filtered, compliant_df, agent_run_desc = agent_func(
                     df.copy())  # data_filtered is 'not_compliant_policy'
@@ -246,8 +260,10 @@ def render_individual_compliance_agent_view(df, selected_agent_key, agent_name_i
         # Special action for FLAG agent: Logging
         if selected_agent_key == "FLAG: Flag Candidates (Not Yet Flagged)" and count > 0:
             if st.button("Log Flagging Instructions to DB", key="log_flags_btn_compliance"):
-                threshold_days_for_log = (datetime.now() - three_years_ago).days
-                status, msg = log_flag_instructions(data_filtered, agent_name_input, threshold_days_for_log)
+                threshold_days_for_log = (datetime.now() - general_threshold_date).days
+                account_ids = data_filtered[
+                    'Account_ID'].tolist()  # Fixed to pass account_ids list instead of DataFrame
+                status, msg = log_flag_instructions(account_ids, agent_name_input, threshold_days_for_log)
                 if status:
                     st.success(msg)
                 else:

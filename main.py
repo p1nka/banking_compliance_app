@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import hashlib
 import hmac
@@ -171,7 +171,13 @@ if check_password():
 
     # dormant_flags_history_df for dormant_ui
     dormant_flags_history_df = pd.DataFrame()  # Default to empty
+    flagging_inactivity_days = st.session_state.get("flagging_inactivity_threshold_days", 3 * 365)  # from sidebar
+    freeze_inactivity_days = st.session_state.get("freeze_inactivity_threshold_days", 3 * 365)  # from sidebar
 
+    report_dt = datetime.strptime(report_date_str, "%Y-%m-%d")  # report_date_str from sidebar date input
+
+    general_threshold_dt = report_dt - timedelta(days=flagging_inactivity_days)
+    freeze_threshold_dt = report_dt - timedelta(days=freeze_inactivity_days)
 
     # Render the sidebar with upload options
     render_sidebar()
@@ -205,7 +211,7 @@ if check_password():
         if app_mode == "🏦 Dormant Account Analyzer":
             ui.dormant_ui.render_dormant_analyzer(df, report_date_str, llm, dormant_flags_history_df)   # NEW
         elif app_mode == "🔒 Compliance Analyzer":
-            ui.compliance_ui.render_compliance_analyzer(df, agent_name_input, llm)
+            ui.compliance_ui.render_compliance_analyzer(df,agent_name_input, llm)
         elif app_mode == "🔍 SQL Bot":
             render_sqlbot(llm)
         elif app_mode == "💬 Chatbot Only":

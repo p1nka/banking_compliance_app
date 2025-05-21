@@ -3,6 +3,7 @@ import pandas as pd
 import re
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_openai import ChatOpenAI  # Added import for OpenAI chat model
 
 from config import DB_NAME, DB_SERVER
 from database.connection import get_db_connection
@@ -17,7 +18,28 @@ from ai.llm import (
 )
 
 
-def render_sqlbot(llm):
+def initialize_llm():
+    """
+    Initialize the LLM model with proper configuration.
+    Returns an initialized LLM model or None if initialization fails.
+    """
+    try:
+        # Try to initialize the OpenAI LLM
+        llm = ChatOpenAI(
+            model_name="gpt-4-turbo",  # Use GPT-4 Turbo for better SQL generation
+            temperature=0.1,  # Low temperature for more deterministic responses
+            max_tokens=2000  # Increase token limit for detailed explanations
+        )
+        st.session_state["llm_available"] = True
+        st.session_state["llm_instance"] = llm
+        return llm
+    except Exception as e:
+        st.error(f"LLM initialization error: {e}")
+        st.session_state["llm_available"] = False
+        return None
+
+
+def render_sqlbot(llm=None):
     """
     Render the SQL Bot UI for natural language to SQL queries.
 
@@ -25,6 +47,15 @@ def render_sqlbot(llm):
         llm: The LLM model for generating SQL
     """
     st.header("SQL Database Query Bot")
+
+    # Initialize LLM if not provided
+    if not llm:
+        llm = initialize_llm()
+        if llm:
+            st.success("✅ AI Assistant initialized successfully")
+    else:
+        st.session_state["llm_available"] = True
+        st.session_state["llm_instance"] = llm
 
     # Add mode selection for query complexity
     query_complexity = st.radio(
@@ -64,51 +95,53 @@ def render_sqlbot(llm):
         st.warning("Cannot use SQL Bot: Database connection failed.")
         return
 
-    # Check if LLM is available
-    if not llm:
-        st.warning(
-            "AI Assistant is not available. SQL Bot will run in basic mode with limited functionality.")
-        # Provide a simple SQL editor as fallback
-        st.subheader("Manual SQL Query")
+    # Check if LLM is available - if not, try to initialize it again
+    if not llm and "llm_available" not in st.session_state or not st.session_state.get("llm_available", False):
+        llm = initialize_llm()
+        if not llm:
+            st.warning(
+                "AI Assistant initialization failed. SQL Bot will run in basic mode with limited functionality.")
+            # Provide a simple SQL editor as fallback
+            st.subheader("Manual SQL Query")
 
-        # If directly connected, suggest the loaded table
-        default_query = f"SELECT TOP 10 * FROM {st.session_state.get('sql_table_schema', 'accounts_data')}" if is_direct_connection else "SELECT TOP 10 * FROM accounts_data"
+            # If directly connected, suggest the loaded table
+            default_query = f"SELECT TOP 10 * FROM {st.session_state.get('sql_table_schema', 'accounts_data')}" if is_direct_connection else "SELECT TOP 10 * FROM accounts_data"
 
-        manual_sql = st.text_area(
-            "Enter SQL query:",
-            value=default_query,
-            height=150
-        )
+            manual_sql = st.text_area(
+                "Enter SQL query:",
+                value=default_query,
+                height=150
+            )
 
-        if st.button("Execute Query", key="execute_manual_sql"):
-            # Clean the SQL query to prevent syntax errors
-            clean_sql = clean_sql_query(manual_sql)
+            if st.button("Execute Query", key="execute_manual_sql"):
+                # Clean the SQL query to prevent syntax errors
+                clean_sql = clean_sql_query(manual_sql)
 
-            try:
-                with st.spinner("Executing query..."):
-                    results_df = pd.read_sql(clean_sql, conn)
+                try:
+                    with st.spinner("Executing query..."):
+                        results_df = pd.read_sql(clean_sql, conn)
 
-                st.subheader("Query Results")
-                if not results_df.empty:
-                    st.dataframe(results_df)
-                    st.info(f"Query returned {len(results_df)} rows.")
+                    st.subheader("Query Results")
+                    if not results_df.empty:
+                        st.dataframe(results_df)
+                        st.info(f"Query returned {len(results_df)} rows.")
 
-                    # CSV download button for results
-                    csv_data = results_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download Results as CSV",
-                        data=csv_data,
-                        file_name=f"sql_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
-                else:
-                    st.info("Query executed successfully but returned no results.")
-            except Exception as e:
-                st.error(f"Query execution error: {e}")
+                        # CSV download button for results
+                        csv_data = results_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="Download Results as CSV",
+                            data=csv_data,
+                            file_name=f"sql_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+                    else:
+                        st.info("Query executed successfully but returned no results.")
+                except Exception as e:
+                    st.error(f"Query execution error: {e}")
 
-        # Show query history
-        show_query_history()
-        return
+            # Show query history
+            show_query_history()
+            return
 
     # Get database schema
     if is_direct_connection:
@@ -143,6 +176,9 @@ def render_sqlbot(llm):
         schema_text = "Database Schema for SQL Bot:\n"
         for table, columns_list in schema.items():
             schema_text += f"Table: {table}\nColumns:\n{chr(10).join([f'- {name} ({dtype})' for name, dtype in columns_list])}\n\n"
+
+        # Store schema in session state for later use
+        st.session_state['db_schema'] = schema_text
 
         with st.expander("Show Database Schema"):
             st.code(schema_text, language='text')
@@ -192,7 +228,6 @@ def render_sqlbot(llm):
             try:
                 with st.spinner(f"🤖 Converting natural language to {'advanced ' if is_advanced_mode else ''}SQL..."):
                     # Choose the appropriate prompt based on mode
-                    from langchain.prompts import PromptTemplate
                     prompt_template = ADVANCED_SQL_GENERATION_PROMPT if is_advanced_mode else SQL_GENERATION_PROMPT
 
                     # If direct connection, make sure the model specifically uses the loaded table
@@ -204,7 +239,6 @@ def render_sqlbot(llm):
                         nl_to_sql_prompt = PromptTemplate.from_template(prompt_template)
 
                     # Updated to use modern langchain methods
-                    from langchain.schema.output_parser import StrOutputParser
                     nl_to_sql_chain = nl_to_sql_prompt | llm | StrOutputParser()
 
                     sql_query_raw = nl_to_sql_chain.invoke({
@@ -243,6 +277,13 @@ def render_sqlbot(llm):
                 except Exception as e:
                     st.warning(f"Error saving to history: {e}")
 
+                # Add to local history for the current session
+                add_query_to_history(
+                    query=sql_query_generated,
+                    explanation=f"Generated from: '{nl_query_sqlbot}'",
+                    ai_generated=True
+                )
+
                 # Execute SQL if in execution mode
                 if not is_generate_only:
                     try:
@@ -255,6 +296,11 @@ def render_sqlbot(llm):
                         if not results_df.empty:
                             st.dataframe(results_df)
                             st.info(f"Query returned {len(results_df)} rows.")
+
+                            # Update the history entry with results
+                            if st.session_state.query_history:
+                                st.session_state.query_history[0]['results'] = results_df
+                                st.session_state.query_history[0]['row_count'] = len(results_df)
 
                             # Add visualization options for certain types of results
                             if len(results_df.columns) >= 2 and len(results_df) > 0 and len(results_df) <= 50:
@@ -339,6 +385,37 @@ def render_sqlbot(llm):
                                     st.info(
                                         "Visualization options not available. Please install plotly for visualization features.")
 
+                                # Add enhanced insights button
+                                if st.button("📊 Generate Data Insights", key="gen_insights_btn"):
+                                    try:
+                                        with st.spinner("🔍 Analyzing data patterns..."):
+                                            # Create a data insights prompt
+                                            data_insights_prompt = f"""
+                                            You are a data analyst examining SQL query results. Analyze the following data summary and provide 3-5 key insights, in bullet point format:
+
+                                            Table summary: {results_df.describe().to_string()}
+
+                                            Column names: {list(results_df.columns)}
+                                            Sample data (first 5 rows): {results_df.head(5).to_dict()}
+
+                                            Original query: "{sql_query_generated}"
+                                            Natural language request: "{nl_query_sqlbot}"
+
+                                            Provide clear, actionable insights focusing on patterns, anomalies, or business implications.
+                                            """
+
+                                            # Call the LLM for insights
+                                            insights_prompt = PromptTemplate.from_template(data_insights_prompt)
+                                            insights_chain = insights_prompt | llm | StrOutputParser()
+
+                                            insights = insights_chain.invoke({})
+
+                                            # Display insights
+                                            st.subheader("Data Insights")
+                                            st.markdown(insights)
+                                    except Exception as insights_e:
+                                        st.error(f"Insights generation error: {insights_e}")
+
                             # CSV download button for results
                             csv_data = results_df.to_csv(index=False).encode('utf-8')
                             st.download_button(
@@ -352,6 +429,9 @@ def render_sqlbot(llm):
 
                     except Exception as e:
                         st.error(f"Query execution error: {e}")
+                        # Update history with error
+                        if st.session_state.query_history:
+                            st.session_state.query_history[0]['error'] = str(e)
                 else:
                     # Add an option to execute even in Generate Only mode
                     if st.button("Execute Generated Query", key="execute_generated_query"):
@@ -365,6 +445,11 @@ def render_sqlbot(llm):
                                 st.dataframe(results_df)
                                 st.info(f"Query returned {len(results_df)} rows.")
 
+                                # Update the history entry with results
+                                if st.session_state.query_history:
+                                    st.session_state.query_history[0]['results'] = results_df
+                                    st.session_state.query_history[0]['row_count'] = len(results_df)
+
                                 # CSV download button for results
                                 csv_data = results_df.to_csv(index=False).encode('utf-8')
                                 st.download_button(
@@ -377,6 +462,9 @@ def render_sqlbot(llm):
                                 st.info("Query executed successfully but returned no results.")
                         except Exception as e:
                             st.error(f"Query execution error: {e}")
+                            # Update history with error
+                            if st.session_state.query_history:
+                                st.session_state.query_history[0]['error'] = str(e)
 
         # Initialize session state variables if not already set
         if 'last_nl_query_sqlbot' not in st.session_state:
@@ -390,8 +478,6 @@ def render_sqlbot(llm):
                 try:
                     with st.spinner("🧠 Analyzing advanced SQL query..."):
                         # Use the advanced explanation prompt for more detailed analysis
-                        from langchain.prompts import PromptTemplate
-                        from langchain.schema.output_parser import StrOutputParser
                         explanation_prompt = PromptTemplate.from_template(
                             ADVANCED_SQL_EXPLANATION_PROMPT if is_advanced_mode else SQL_EXPLANATION_PROMPT
                         )
@@ -403,11 +489,107 @@ def render_sqlbot(llm):
                         })
                         st.subheader("Query Analysis")
                         st.markdown(explanation)
+
+                        # Update the history entry with explanation
+                        if st.session_state.query_history:
+                            st.session_state.query_history[0]['explanation'] = explanation
                 except Exception as e:
                     st.error(f"Query explanation error: {e}")
                     fallback_explanation = get_fallback_response("sql_explanation")
                     st.warning("Using fallback explanation due to AI error.")
                     st.markdown(fallback_explanation)
+
+        # Add option to optimize the query if it has been generated
+        if st.session_state.get('generated_sql_sqlbot'):
+            if st.button("🚀 Optimize Generated Query", key="optimize_sql_button"):
+                try:
+                    with st.spinner("⚙️ Optimizing SQL query for performance..."):
+                        # Create optimization prompt
+                        optimization_prompt = """
+                        You are a database performance expert. Review and optimize the following SQL query for better performance.
+                        The optimization should maintain the exact same result set but improve execution speed.
+
+                        Original SQL Query:
+                        ```sql
+                        {sql_query}
+                        ```
+
+                        Database Schema:
+                        {schema}
+
+                        Please provide:
+                        1. The optimized SQL query
+                        2. A brief explanation of the optimizations made
+                        3. Why these optimizations improve performance
+
+                        Optimized Query:
+                        """
+
+                        optimize_prompt = PromptTemplate.from_template(optimization_prompt)
+                        sql_optimization_chain = optimize_prompt | llm | StrOutputParser()
+
+                        optimization_result = sql_optimization_chain.invoke({
+                            "sql_query": st.session_state.generated_sql_sqlbot,
+                            "schema": schema_text
+                        })
+
+                        # Extract just the SQL from the result
+                        optimized_sql_match = re.search(r"```sql\s*(.*?)\s*```", optimization_result, re.DOTALL)
+                        if optimized_sql_match:
+                            optimized_sql = optimized_sql_match.group(1).strip()
+                        else:
+                            # Try a different pattern if the first one fails
+                            optimized_sql_match = re.search(r"Optimized Query:\s*(.*?)(?:\n\n|$)", optimization_result,
+                                                            re.DOTALL)
+                            if optimized_sql_match:
+                                optimized_sql = optimized_sql_match.group(1).strip()
+                            else:
+                                optimized_sql = None
+
+                        # Display optimization results
+                        st.subheader("Query Optimization")
+
+                        # Display full optimization details
+                        st.markdown(optimization_result)
+
+                        # If valid SQL was extracted, allow execution of optimized query
+                        if optimized_sql and optimized_sql.lower().strip().startswith("select"):
+                            st.session_state.optimized_sql = optimized_sql
+                            st.subheader("Optimized SQL Query")
+                            st.code(optimized_sql, language='sql')
+
+                            if st.button("Execute Optimized Query", key="execute_optimized_query"):
+                                try:
+                                    with st.spinner("⏳ Executing optimized query..."):
+                                        opt_results_df = pd.read_sql(optimized_sql, conn)
+
+                                    st.subheader("Optimized Query Results")
+                                    if not opt_results_df.empty:
+                                        st.dataframe(opt_results_df)
+                                        st.info(f"Optimized query returned {len(opt_results_df)} rows.")
+
+                                        # Add to history
+                                        add_query_to_history(
+                                            query=optimized_sql,
+                                            results=opt_results_df,
+                                            explanation="Optimized version of previous query",
+                                            ai_generated=True
+                                        )
+
+                                        # CSV download button for results
+                                        csv_data = opt_results_df.to_csv(index=False).encode('utf-8')
+                                        st.download_button(
+                                            label="Download Optimized Results as CSV",
+                                            data=csv_data,
+                                            file_name=f"optimized_sql_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                            mime="text/csv"
+                                        )
+                                    else:
+                                        st.info("Optimized query executed successfully but returned no results.")
+                                except Exception as e:
+                                    st.error(f"Optimized query execution error: {e}")
+                except Exception as e:
+                    st.error(f"Query optimization error: {e}")
 
         # Show query history
         show_query_history()
@@ -456,9 +638,6 @@ def generate_sql_only(nl_query, schema_text, llm, is_advanced_mode=True, selecte
     """
     try:
         # Choose the appropriate prompt based on mode
-        from langchain.prompts import PromptTemplate
-        from langchain.schema.output_parser import StrOutputParser
-
         prompt_template = ADVANCED_SQL_GENERATION_PROMPT if is_advanced_mode else SQL_GENERATION_PROMPT
 
         # If table specified, make sure the model focuses on it
@@ -623,62 +802,68 @@ def show_query_history():
                         st.write(query_item['explanation'])
 
                         # Add AI enhancement option if LLM is available
-                        if 'llm_available' in st.session_state and st.session_state.llm_available:
+                        if st.session_state.get('llm_available', False) and st.session_state.get('llm_instance'):
                             if st.button("🧠 Generate Enhanced Explanation", key=f"enhance_btn_{i}"):
-                                from llm import SQL_EXPLANATION_PROMPT
+                                try:
+                                    with st.spinner("Generating enhanced explanation..."):
+                                        # Get the schema from session state
+                                        schema = st.session_state.get('db_schema', "Schema not available")
 
-                                with st.spinner("Generating enhanced explanation..."):
-                                    # Get the schema from session state
-                                    schema = st.session_state.get('db_schema', "Schema not available")
+                                        # Create the explanation prompt
+                                        explanation_prompt = PromptTemplate.from_template(
+                                            ADVANCED_SQL_EXPLANATION_PROMPT
+                                        )
 
-                                    # Format the prompt
-                                    prompt = SQL_EXPLANATION_PROMPT.format(
-                                        schema=schema,
-                                        sql_query=query_item.get('query', '')
-                                    )
+                                        # Get the LLM from session state
+                                        llm = st.session_state['llm_instance']
 
-                                    # Call the LLM
-                                    llm = st.session_state.get('llm_instance')
-                                    if llm:
-                                        from langchain_core.messages import HumanMessage
-                                        from llm import StrOutputParser
+                                        # Create the chain
+                                        explanation_chain = explanation_prompt | llm | StrOutputParser()
 
-                                        result = llm.invoke([HumanMessage(content=prompt)])
-                                        explanation = StrOutputParser().invoke(result)
+                                        # Generate enhanced explanation
+                                        explanation = explanation_chain.invoke({
+                                            "sql_query": query_item.get('query', ''),
+                                            "schema": schema
+                                        })
 
                                         # Update the query item with new explanation
                                         query_item['explanation'] = explanation
                                         st.experimental_rerun()
+                                except Exception as e:
+                                    st.error(f"Explanation error: {e}")
                     else:
                         st.info("No explanation available.")
 
                         # Add AI explanation generation if LLM is available
-                        if 'llm_available' in st.session_state and st.session_state.llm_available:
+                        if st.session_state.get('llm_available', False) and st.session_state.get('llm_instance'):
                             if st.button("🧠 Generate Explanation", key=f"gen_explain_btn_{i}"):
-                                from llm import SQL_EXPLANATION_PROMPT
+                                try:
+                                    with st.spinner("Generating explanation..."):
+                                        # Get the schema from session state
+                                        schema = st.session_state.get('db_schema', "Schema not available")
 
-                                with st.spinner("Generating explanation..."):
-                                    # Get the schema from session state
-                                    schema = st.session_state.get('db_schema', "Schema not available")
+                                        # Create the explanation prompt
+                                        explanation_prompt = PromptTemplate.from_template(
+                                            SQL_EXPLANATION_PROMPT
+                                        )
 
-                                    # Format the prompt
-                                    prompt = SQL_EXPLANATION_PROMPT.format(
-                                        schema=schema,
-                                        sql_query=query_item.get('query', '')
-                                    )
+                                        # Get the LLM from session state
+                                        llm = st.session_state['llm_instance']
 
-                                    # Call the LLM
-                                    llm = st.session_state.get('llm_instance')
-                                    if llm:
-                                        from langchain_core.messages import HumanMessage
-                                        from llm import StrOutputParser
+                                        # Create the chain
+                                        explanation_chain = explanation_prompt | llm | StrOutputParser()
 
-                                        result = llm.invoke([HumanMessage(content=prompt)])
-                                        explanation = StrOutputParser().invoke(result)
+                                        # Generate explanation
+                                        explanation = explanation_chain.invoke({
+                                            "sql_query": query_item.get('query', ''),
+                                            "schema": schema
+                                        })
 
                                         # Update the query item with new explanation
                                         query_item['explanation'] = explanation
                                         st.experimental_rerun()
+                                except Exception as e:
+                                    st.error(f"Explanation error: {e}")
 
                 with tabs[3]:  # Metadata tab
                     metadata_col1, metadata_col2 = st.columns(2)
@@ -697,17 +882,15 @@ def show_query_history():
                             st.text(f"Notes: {query_item.get('performance_notes', '')}")
 
                     # Add insights section if AI is available
-                    if 'llm_available' in st.session_state and st.session_state.llm_available:
+                    if st.session_state.get('llm_available', False) and st.session_state.get('llm_instance'):
                         if st.button("🔍 Generate Query Insights", key=f"insights_btn_{i}"):
-                            with st.spinner("Analyzing query..."):
-                                # Get the LLM instance
-                                llm = st.session_state.get('llm_instance')
-                                if llm:
-                                    from langchain_core.messages import HumanMessage
-                                    from llm import StrOutputParser
+                            try:
+                                with st.spinner("Analyzing query..."):
+                                    # Get the LLM instance
+                                    llm = st.session_state['llm_instance']
 
                                     # Custom prompt for insights
-                                    insights_prompt = """
+                                    insights_prompt_template = """
                                     You are a database performance expert. Analyze this SQL query and provide brief insights about:
                                     1. Query structure and best practices
                                     2. Potential performance optimizations
@@ -722,12 +905,16 @@ def show_query_history():
                                     Insights:
                                     """
 
-                                    # Format the prompt
-                                    prompt = insights_prompt.format(query=query_item.get('query', ''))
+                                    # Create the prompt
+                                    insights_prompt = PromptTemplate.from_template(insights_prompt_template)
 
-                                    # Call the LLM
-                                    result = llm.invoke([HumanMessage(content=prompt)])
-                                    insights = StrOutputParser().invoke(result)
+                                    # Create the chain
+                                    insights_chain = insights_prompt | llm | StrOutputParser()
+
+                                    # Generate insights
+                                    insights = insights_chain.invoke({
+                                        "query": query_item.get('query', '')
+                                    })
 
                                     # Display insights
                                     st.subheader("Query Insights")
@@ -735,12 +922,14 @@ def show_query_history():
 
                                     # Store insights for future reference
                                     query_item['insights'] = insights
+                            except Exception as e:
+                                st.error(f"Insights generation error: {e}")
     else:
         # Display a message if no queries have been run
         st.info("No SQL queries have been executed yet.")
 
         # Provide a helpful tip based on whether AI is available
-        if 'llm_available' in st.session_state and st.session_state.llm_available:
+        if st.session_state.get('llm_available', False):
             st.success("Tip: You can ask questions in natural language, and the AI will generate SQL for you!")
 
             # Add sample questions to get started
@@ -796,6 +985,9 @@ def add_query_to_history(query, results=None, explanation=None, error=None, ai_g
     # Record execution metrics
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Start execution time tracking
+    start_time = time.time()
+
     # Create the query history item
     query_item = {
         'query': query,
@@ -803,7 +995,8 @@ def add_query_to_history(query, results=None, explanation=None, error=None, ai_g
         'explanation': explanation,
         'error': error,
         'timestamp': timestamp,
-        'ai_generated': ai_generated
+        'ai_generated': ai_generated,
+        'execution_time': round(time.time() - start_time, 3)
     }
 
     # Add row count if results is a DataFrame
@@ -820,9 +1013,17 @@ def add_query_to_history(query, results=None, explanation=None, error=None, ai_g
 
     return query_item
 
+
 def execute_sql_query(query, connection):
     """
     Execute a SQL query and store it in the history.
+
+    Args:
+        query: SQL query string to execute
+        connection: Database connection object
+
+    Returns:
+        DataFrame with query results or None if execution failed
     """
     import streamlit as st
     import pandas as pd
@@ -837,29 +1038,83 @@ def execute_sql_query(query, connection):
 
     try:
         results = pd.read_sql(query, connection)
-        execution_time = round(time.time() - start_time, 2)
+        execution_time = round(time.time() - start_time, 3)
 
         # Store in history
-        st.session_state.query_history.append({
+        history_entry = {
             'query': query,
             'results': results,
             'timestamp': timestamp,
             'execution_time': execution_time,
-            'error': None
-        })
+            'error': None,
+            'row_count': len(results),
+            'ai_generated': False
+        }
+
+        st.session_state.query_history.insert(0, history_entry)
 
         return results
 
     except Exception as e:
-        execution_time = round(time.time() - start_time, 2)
+        execution_time = round(time.time() - start_time, 3)
 
         # Store error in history
-        st.session_state.query_history.append({
+        history_entry = {
             'query': query,
             'results': None,
             'timestamp': timestamp,
             'execution_time': execution_time,
-            'error': str(e)
-        })
+            'error': str(e),
+            'ai_generated': False
+        }
+
+        st.session_state.query_history.insert(0, history_entry)
 
         raise e
+
+
+# Add a function for automated performance analysis
+def analyze_query_performance(query, schema_text, llm):
+    """
+    Analyze SQL query for performance issues and suggest optimizations.
+
+    Args:
+        query: SQL query string to analyze
+        schema_text: Database schema as text
+        llm: LLM instance
+
+    Returns:
+        String with performance analysis
+    """
+    try:
+        # Create performance analysis prompt
+        performance_prompt_template = """
+        You are a database performance expert. Analyze the following SQL query for potential performance issues:
+
+        ```sql
+        {sql_query}
+        ```
+
+        Database Schema:
+        {schema}
+
+        Provide a concise analysis of:
+        1. Potential performance bottlenecks
+        2. Missing indexes or optimization opportunities
+        3. Best practices that could be applied
+        4. Alternative query structures that might be more efficient
+
+        Format your response as a structured performance report with clear recommendations.
+        """
+
+        performance_prompt = PromptTemplate.from_template(performance_prompt_template)
+        performance_chain = performance_prompt | llm | StrOutputParser()
+
+        performance_analysis = performance_chain.invoke({
+            "sql_query": query,
+            "schema": schema_text
+        })
+
+        return performance_analysis
+    except Exception as e:
+        return f"Performance analysis failed: {str(e)}"

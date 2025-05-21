@@ -1,9 +1,9 @@
-# --- START OF REFINED agents/compliance.py ---
 import pandas as pd
 from datetime import datetime, timedelta
 import streamlit as st
 # Assuming get_db_connection is correctly set up in your project
-from database.connection import get_db_connection  # Or your specific path
+from database.connection import get_db_connection
+import pyodbc  # Added import for pyodbc
 
 # CBUAE Compliance Periods/Values (can be in config.py)
 THREE_MONTH_WAIT_DAYS = 90
@@ -220,57 +220,6 @@ def detect_cbuae_transfer_candidates(df):
         return pd.DataFrame(), 0, f"(Error in CBUAE Transfer Candidates check: {e})"
 
 
-# (log_flag_instructions remains largely the same as your provided version, ensure it takes account_ids (list), agent_name, threshold_days)
-# The log_flag_instructions in your provided compliance.py looks fine for its purpose.
-
-def run_all_compliance_checks(df, general_threshold_date, freeze_threshold_date, cbuae_cutoff_date_ignored=None,
-                              agent_name="ComplianceSystem"):
-    """
-    Run all compliance checks.
-    'cbuae_cutoff_date' is not directly used here as 'detect_cbuae_transfer_candidates' relies on a pre-set flag.
-    'general_threshold_date' is for 'detect_unflagged_dormant_candidates'.
-    'freeze_threshold_date' is for 'detect_statement_freeze_candidates'.
-    """
-    results = {
-        "total_accounts_processed": len(df),
-        "incomplete_contact": {}, "unflagged_dormant": {},
-        "internal_ledger": {}, "statement_freeze": {}, "cbuae_transfer": {},
-        "flag_logging_status": {}
-    }
-    df_copy = df.copy()
-
-    results["incomplete_contact"]["df"], results["incomplete_contact"]["count"], results["incomplete_contact"]["desc"] = \
-        detect_incomplete_contact_attempts(df_copy)
-
-    results["unflagged_dormant"]["df"], results["unflagged_dormant"]["count"], results["unflagged_dormant"]["desc"] = \
-        detect_unflagged_dormant_candidates(df_copy, general_threshold_date)
-
-    # Log if unflagged candidates found
-    if results["unflagged_dormant"]["count"] > 0 and 'Account_ID' in results["unflagged_dormant"]["df"].columns:
-        ids_to_log = results["unflagged_dormant"]["df"]['Account_ID'].tolist()
-        # Determine threshold_days based on general_threshold_date for logging
-        # This is an approximation for the log; individual records might have different effective thresholds (e.g. instruments)
-        log_threshold_days = (datetime.now() - general_threshold_date).days
-        status, msg = log_flag_instructions(ids_to_log, agent_name, log_threshold_days)
-        results["flag_logging_status"] = {"status": status, "message": msg}
-    else:
-        results["flag_logging_status"] = {"status": True,
-                                          "message": "No unflagged candidates to log or Account_ID missing."}
-
-    results["internal_ledger"]["df"], results["internal_ledger"]["count"], results["internal_ledger"]["desc"] = \
-        detect_internal_ledger_candidates(df_copy)
-
-    results["statement_freeze"]["df"], results["statement_freeze"]["count"], results["statement_freeze"]["desc"] = \
-        detect_statement_freeze_candidates(df_copy, freeze_threshold_date)
-
-    results["cbuae_transfer"]["df"], results["cbuae_transfer"]["count"], results["cbuae_transfer"]["desc"] = \
-        detect_cbuae_transfer_candidates(df_copy)  # Relies on 'Expected_Transfer_to_CB_Due'
-
-    return results
-
-
-# The `log_flag_instructions` function from your provided `compliance.py` seems fine.
-# I'll include it here for completeness, assuming it's part of this file.
 def log_flag_instructions(account_ids, agent_name, threshold_days):
     """
     Log flagging instructions to the dormant_flags table.
@@ -356,3 +305,341 @@ def log_flag_instructions(account_ids, agent_name, threshold_days):
 
     except Exception as e:
         return False, f"DB logging failed: {e}"
+
+
+# Additional compliance agents
+def detect_flag_candidates(df, inactivity_threshold_date):
+    """Alias for detect_unflagged_dormant_candidates for UI compatibility"""
+    return detect_unflagged_dormant_candidates(df, inactivity_threshold_date)
+
+
+def detect_ledger_candidates(df):
+    """Alias for detect_internal_ledger_candidates for UI compatibility"""
+    return detect_internal_ledger_candidates(df)
+
+
+def detect_freeze_candidates(df, inactivity_threshold_date_for_freeze):
+    """Alias for detect_statement_freeze_candidates for UI compatibility"""
+    return detect_statement_freeze_candidates(df, inactivity_threshold_date_for_freeze)
+
+
+def detect_transfer_candidates_to_cb(df):
+    """Alias for detect_cbuae_transfer_candidates for UI compatibility"""
+    return detect_cbuae_transfer_candidates(df)
+
+
+def detect_foreign_currency_conversion_needed(df):
+    """
+    Detects dormant accounts in foreign currency that need conversion to AED for CBUAE transfer (Art. 8.5).
+    """
+    try:
+        required_cols = ['Account_ID', 'Expected_Account_Dormant', 'Expected_Transfer_to_CB_Due', 'Currency',
+                         'Current_Balance']
+        if not all(col in df.columns for col in required_cols):
+            missing = [c for c in required_cols if c not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped FX Conversion: Missing {', '.join(missing)})"
+
+        data = df[
+            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
+            (df['Expected_Transfer_to_CB_Due'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
+            (~df['Currency'].astype(str).str.upper().isin(['AED', 'DIRHAM', 'DIRHAMS', ''])) &
+            (pd.to_numeric(df['Current_Balance'], errors='coerce').fillna(0) > 0)
+            ].copy()
+        count = len(data)
+        desc = f"Foreign currency dormant accounts needing AED conversion for CBUAE transfer (Art. 8.5): {count} accounts"
+        return data, count, desc
+    except Exception as e:
+        return pd.DataFrame(), 0, f"(Error in Foreign Currency Conversion check: {e})"
+
+
+def detect_sdb_court_application_needed(df):
+    """
+    Detects Safe Deposit Boxes requiring court application (Art. 3.7).
+    """
+    try:
+        required_cols = [
+            'Account_ID', 'Account_Type', 'Expected_Account_Dormant',
+            'SDB_Charges_Outstanding', 'SDB_Court_Application_Submitted'
+        ]
+        if not all(col in df.columns for col in required_cols):
+            missing = [c for c in required_cols if c not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped SDB Court Application: Missing {', '.join(missing)})"
+
+        data = df[
+            (df['Account_Type'].astype(str).str.contains("Safe Deposit", case=False, na=False)) &
+            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
+            (pd.to_numeric(df['SDB_Charges_Outstanding'], errors='coerce').fillna(0) > 0) &
+            (~df['SDB_Court_Application_Submitted'].astype(str).str.lower().isin(['yes', 'true', '1']))
+            ].copy()
+        count = len(data)
+        desc = f"Safe Deposit Boxes requiring court application (Art. 3.7): {count} boxes"
+        return data, count, desc
+    except Exception as e:
+        return pd.DataFrame(), 0, f"(Error in SDB Court Application check: {e})"
+
+
+def detect_unclaimed_payment_instruments_ledger(df):
+    """
+    Detects unclaimed payment instruments for internal ledger (Art. 3.6).
+    """
+    try:
+        required_cols = [
+            'Account_ID', 'Account_Type', 'Expected_Account_Dormant',
+            'Unclaimed_Item_Trigger_Date', 'Moved_To_Internal_Dormant_Ledger'
+        ]
+        if not all(col in df.columns for col in required_cols):
+            missing = [c for c in required_cols if c not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped Unclaimed Instruments Ledger: Missing {', '.join(missing)})"
+
+        if not pd.api.types.is_datetime64_dtype(df['Unclaimed_Item_Trigger_Date']):
+            df['Unclaimed_Item_Trigger_Date'] = pd.to_datetime(df['Unclaimed_Item_Trigger_Date'], errors='coerce')
+
+        data = df[
+            (df['Account_Type'].astype(str).str.contains("Cheque|Draft|Order", case=False, na=False)) &
+            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
+            (df['Unclaimed_Item_Trigger_Date'].notna()) &
+            (~df['Moved_To_Internal_Dormant_Ledger'].astype(str).str.lower().isin(['yes', 'true', '1']))
+            ].copy()
+        count = len(data)
+        desc = f"Unclaimed payment instruments for internal ledger (Art. 3.6): {count} instruments"
+        return data, count, desc
+    except Exception as e:
+        return pd.DataFrame(), 0, f"(Error in Unclaimed Instruments Ledger check: {e})"
+
+
+def detect_claim_processing_pending(df):
+    """
+    Detects customer claims (>1 month old) pending processing (Art. 4).
+    """
+    try:
+        required_cols = [
+            'Account_ID', 'Customer_Claim_Date', 'Claim_Status'
+        ]
+        if not all(col in df.columns for col in required_cols):
+            missing = [c for c in required_cols if c not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped Claims Processing: Missing {', '.join(missing)})"
+
+        if not pd.api.types.is_datetime64_dtype(df['Customer_Claim_Date']):
+            df['Customer_Claim_Date'] = pd.to_datetime(df['Customer_Claim_Date'], errors='coerce')
+
+        one_month_ago = datetime.now() - timedelta(days=30)
+
+        data = df[
+            (df['Customer_Claim_Date'].notna()) &
+            (df['Customer_Claim_Date'] < one_month_ago) &
+            (~df['Claim_Status'].astype(str).str.lower().isin(['completed', 'processed', 'resolved', 'rejected']))
+            ].copy()
+        count = len(data)
+        desc = f"Customer claims (>1 month old) pending processing (Art. 4): {count} claims"
+        return data, count, desc
+    except Exception as e:
+        return pd.DataFrame(), 0, f"(Error in Claims Processing check: {e})"
+
+
+def generate_annual_cbuae_report_summary(df):
+    """
+    Generates summary for CBUAE Annual Report (Art. 3.10).
+    """
+    try:
+        required_cols = [
+            'Account_ID', 'Expected_Account_Dormant', 'Current_Balance', 'Currency',
+            'Expected_Transfer_to_CB_Due', 'Transferred_to_CBUAE_Date'
+        ]
+        if not all(col in df.columns for col in required_cols):
+            missing = [c for c in required_cols if c not in df.columns]
+            return pd.DataFrame(), 0, f"(Skipped Annual Report: Missing {', '.join(missing)})"
+
+        # Get accounts flagged dormant
+        dormant_accounts = df[
+            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1']))
+        ].copy()
+
+        # Get accounts flagged for CB transfer but not yet transferred
+        pending_cb_transfer = df[
+            (df['Expected_Transfer_to_CB_Due'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
+            (~df['Transferred_to_CBUAE_Date'].notna())
+            ].copy()
+
+        # Get accounts already transferred to CB
+        transferred_to_cb = df[
+            (df['Transferred_to_CBUAE_Date'].notna())
+        ].copy()
+
+        # Create report summary data
+        this_year = datetime.now().year
+        summary_data = {
+            'ReportYear': this_year,
+            'TotalDormantAccounts': len(dormant_accounts),
+            'TotalDormantBalance': dormant_accounts['Current_Balance'].astype(float).sum(),
+            'PendingCBTransfer': len(pending_cb_transfer),
+            'PendingCBTransferBalance': pending_cb_transfer['Current_Balance'].astype(float).sum(),
+            'TransferredToCB': len(transferred_to_cb),
+            'TransferredToCBBalance': transferred_to_cb['Current_Balance'].astype(float).sum(),
+            'ReportGenerationDate': datetime.now()
+        }
+
+        # Convert to DataFrame for the report
+        summary_df = pd.DataFrame([summary_data])
+
+        count = 1  # Just one summary row
+        desc = f"Annual CBUAE Report Summary for {this_year} generated (Art. 3.10): {len(dormant_accounts)} dormant accounts"
+        return summary_df, count, desc
+    except Exception as e:
+        return pd.DataFrame(), 0, f"(Error in Annual Report Summary check: {e})"
+
+
+def check_record_retention_compliance(df):
+    """
+    Checks record retention compliance (Art. 3.9 related).
+    Returns two DataFrames:
+    1. Records not meeting policy retention requirement (not compliant)
+    2. Compliant records (meets retention or CBUAE perpetual)
+    """
+    try:
+        required_cols = [
+            'Account_ID', 'Expected_Transfer_to_CB_Due', 'Transferred_to_CBUAE_Date',
+            'Date_Last_Cust_Initiated_Activity', 'Record_Retention_End_Date'
+        ]
+        if not all(col in df.columns for col in required_cols):
+            missing = [c for c in required_cols if c not in df.columns]
+            return pd.DataFrame(), pd.DataFrame(), f"(Skipped Record Retention: Missing {', '.join(missing)})"
+
+        # Convert date columns
+        date_cols = ['Date_Last_Cust_Initiated_Activity', 'Record_Retention_End_Date', 'Transferred_to_CBUAE_Date']
+        for col in date_cols:
+            if col in df.columns and not pd.api.types.is_datetime64_dtype(df[col]):
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+
+        # Calculate records that might need retention
+        # 1. Items transferred to CBUAE - perpetual retention
+        cbuae_transferred = df[df['Transferred_to_CBUAE_Date'].notna()].copy()
+
+        # 2. Items not transferred to CBUAE - retention based on bank policy
+        bank_policy_records = df[
+            (~df['Transferred_to_CBUAE_Date'].notna()) &
+            (df['Date_Last_Cust_Initiated_Activity'].notna())
+            ].copy()
+
+        # For bank policy records, calculate retention end date if not already populated
+        # Default policy is to keep records for RECORD_RETENTION_YEARS_POLICY years after last activity
+        if not bank_policy_records.empty:
+            bank_policy_records.loc[:, 'Calculated_Retention_End'] = bank_policy_records[
+                                                                         'Date_Last_Cust_Initiated_Activity'] + \
+                                                                     pd.Timedelta(
+                                                                         days=365 * RECORD_RETENTION_YEARS_POLICY)
+
+            # If Record_Retention_End_Date is populated, use that instead
+            bank_policy_records.loc[:, 'Effective_Retention_End'] = bank_policy_records.apply(
+                lambda x: x['Record_Retention_End_Date'] if pd.notna(x['Record_Retention_End_Date'])
+                else x['Calculated_Retention_End'], axis=1
+            )
+
+            # Records not compliant with policy - retention date passed
+            not_compliant_policy = bank_policy_records[
+                bank_policy_records['Effective_Retention_End'] < datetime.now()
+                ].copy()
+
+            # Records compliant with policy - retention date in future
+            compliant_policy = bank_policy_records[
+                bank_policy_records['Effective_Retention_End'] >= datetime.now()
+                ].copy()
+        else:
+            not_compliant_policy = pd.DataFrame()
+            compliant_policy = pd.DataFrame()
+
+        # Combine compliant: Policy-compliant records and CBUAE transferred (perpetual)
+        compliant_df = pd.concat([compliant_policy, cbuae_transferred]).drop_duplicates(subset=['Account_ID'])
+
+        count = len(not_compliant_policy)
+        desc = f"Records potentially not compliant with retention policy (Art. 3.9): {count} records"
+        return not_compliant_policy, compliant_df, desc
+    except Exception as e:
+        return pd.DataFrame(), pd.DataFrame(), f"(Error in Record Retention Compliance check: {e})"
+
+
+def run_all_compliance_checks(df, general_threshold_date, freeze_threshold_date, cbuae_cutoff_date_ignored=None,
+                              agent_name="ComplianceSystem"):
+    """
+    Run all compliance checks.
+    'cbuae_cutoff_date' is not directly used here as 'detect_cbuae_transfer_candidates' relies on a pre-set flag.
+    'general_threshold_date' is for 'detect_unflagged_dormant_candidates'.
+    'freeze_threshold_date' is for 'detect_statement_freeze_candidates'.
+    """
+    results = {
+        "total_accounts_processed": len(df),
+        "incomplete_contact": {},
+        "flag_candidates": {},
+        "ledger_candidates_internal": {},
+        "statement_freeze_needed": {},
+        "transfer_candidates_cb": {},
+        "fx_conversion_needed": {},
+        "sdb_court_application": {},
+        "unclaimed_instruments_ledger": {},
+        "claims_processing_pending": {},
+        "annual_cbuae_report": {},
+        "record_retention_check": {},
+        "flag_logging_status": {}
+    }
+    df_copy = df.copy()  # Work on a copy to avoid modifying original df
+
+    # Run all the compliance checks
+    results["incomplete_contact"]["df"], results["incomplete_contact"]["count"], results["incomplete_contact"]["desc"] = \
+        detect_incomplete_contact_attempts(df_copy)
+
+    results["flag_candidates"]["df"], results["flag_candidates"]["count"], results["flag_candidates"]["desc"] = \
+        detect_flag_candidates(df_copy, general_threshold_date)
+
+    # Log if unflagged candidates found
+    if results["flag_candidates"]["count"] > 0 and 'Account_ID' in results["flag_candidates"]["df"].columns:
+        ids_to_log = results["flag_candidates"]["df"]['Account_ID'].tolist()
+        # Determine threshold_days based on general_threshold_date for logging
+        # This is an approximation for the log; individual records might have different effective thresholds (e.g. instruments)
+        log_threshold_days = (datetime.now() - general_threshold_date).days
+        status, msg = log_flag_instructions(ids_to_log, agent_name, log_threshold_days)
+        results["flag_logging_status"] = {"status": status, "message": msg}
+    else:
+        results["flag_logging_status"] = {"status": True,
+                                          "message": "No unflagged candidates to log or Account_ID missing."}
+
+    results["ledger_candidates_internal"]["df"], results["ledger_candidates_internal"]["count"], \
+    results["ledger_candidates_internal"]["desc"] = \
+        detect_ledger_candidates(df_copy)
+
+    results["statement_freeze_needed"]["df"], results["statement_freeze_needed"]["count"], \
+    results["statement_freeze_needed"]["desc"] = \
+        detect_freeze_candidates(df_copy, freeze_threshold_date)
+
+    results["transfer_candidates_cb"]["df"], results["transfer_candidates_cb"]["count"], \
+    results["transfer_candidates_cb"]["desc"] = \
+        detect_transfer_candidates_to_cb(df_copy)  # Relies on 'Expected_Transfer_to_CB_Due'
+
+    results["fx_conversion_needed"]["df"], results["fx_conversion_needed"]["count"], results["fx_conversion_needed"][
+        "desc"] = \
+        detect_foreign_currency_conversion_needed(df_copy)
+
+    results["sdb_court_application"]["df"], results["sdb_court_application"]["count"], results["sdb_court_application"][
+        "desc"] = \
+        detect_sdb_court_application_needed(df_copy)
+
+    results["unclaimed_instruments_ledger"]["df"], results["unclaimed_instruments_ledger"]["count"], \
+    results["unclaimed_instruments_ledger"]["desc"] = \
+        detect_unclaimed_payment_instruments_ledger(df_copy)
+
+    results["claims_processing_pending"]["df"], results["claims_processing_pending"]["count"], \
+    results["claims_processing_pending"]["desc"] = \
+        detect_claim_processing_pending(df_copy)
+
+    results["annual_cbuae_report"]["df"], results["annual_cbuae_report"]["count"], results["annual_cbuae_report"][
+        "desc"] = \
+        generate_annual_cbuae_report_summary(df_copy)
+
+    # Special handling for record retention which returns two dataframes
+    not_compliant_df, compliant_df, retention_desc = check_record_retention_compliance(df_copy)
+    results["record_retention_check"] = {
+        "df": not_compliant_df,
+        "compliant_df": compliant_df,
+        "count": len(not_compliant_df),
+        "desc": retention_desc
+    }
+
+    return results
