@@ -131,7 +131,7 @@ if check_password():
     from ui.dormant_ui import render_dormant_analyzer
     from ui.compliance_ui import render_compliance_analyzer
     from ui.sqlbot_ui import render_sqlbot
-    from ui.chatbot_ui import render_chatbot
+    from ai.chatbot import display_chat_interface as render_chatbot
 
     # Import AI model
     from ai.llm import load_llm
