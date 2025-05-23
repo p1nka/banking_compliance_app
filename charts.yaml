@@ -1,0 +1,17 @@
+apiVersion: v2
+name: banking-compliance-app
+description: A Helm chart for Banking Compliance Streamlit Application
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - banking
+  - compliance
+  - streamlit
+  - python
+home: https://github.com/your-org/banking-compliance-app
+sources:
+  - https://github.com/your-org/banking-compliance-app
+maintainers:
+  - name: Your Name
+    email: your-email@company.com
