@@ -1,0 +1,168 @@
+# .dockerignore - Banking Compliance Application
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+README.md
+*.md
+docs/
+documentation/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Virtual environments
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment variables (keep secrets.toml.example if you have one)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Temporary folders
+tmp/
+temp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Application specific
+# Exclude actual secrets but keep template
+.streamlit/secrets.toml
+# But allow config.toml
+!.streamlit/config.toml
+
+# Test files
+test/
+tests/
+*_test.py
+test_*.py
+
+# Development scripts
+scripts/dev/
+dev/
+development/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+.circleci/
+azure-pipelines.yml
+
+# Package managers
+node_modules/
+npm-debug.log
+yarn.lock
+package-lock.json
+
+# Database files (if any local ones)
+*.db
+*.sqlite
+*.sqlite3
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Sample data (if large)
+sample_data/
+test_data/
+data/samples/
+
+# Development utilities
+lint-results.xml
+.pylintrc
+mypy.ini
+.flake8
+.bandit
+
+# Kubernetes
+k8s/
+kubernetes/
+*.yaml
+*.yml
+!.streamlit/config.toml
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Local development
+local/
+.local/
+
+# MacOS
+.AppleDouble
+.LSOverride
+
+# Windows
+Desktop.ini
+$RECYCLE.BIN/
