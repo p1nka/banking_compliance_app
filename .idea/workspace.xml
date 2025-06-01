@@ -4,18 +4,16 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="63761940-712c-4363-bb8e-5dc1b9ff83c9" name="Changes" comment="updated banking compliance code">
-      <change afterPath="$PROJECT_DIR$/charts.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/templates/_helpers.tpl" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/templates/deployment.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/templates/hpa.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/templates/ingress.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/templates/poddistruptionbudget.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/templates/secrets.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/templates/service.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/templates/serviceaccount.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/values.yaml" afterDir="false" />
+    <list default="true" id="63761940-712c-4363-bb8e-5dc1b9ff83c9" name="Changes" comment="kubernetes files">
+      <change afterPath="$PROJECT_DIR$/banking_api.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.dockerignore" beforeDir="false" afterPath="$PROJECT_DIR$/.dockerignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" afterPath="$PROJECT_DIR$/.env.example" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.streamlit/secrets.toml" beforeDir="false" afterPath="$PROJECT_DIR$/.streamlit/secrets.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/agents/dormant.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/dormant.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -67,27 +65,28 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;ASKED_SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;SHELLCHECK.PATH&quot;: &quot;C:\\Users\\Admin\\AppData\\Roaming\\JetBrains\\PyCharm2025.1\\plugins\\Shell Script\\shellcheck.exe&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
-    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
-    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ASKED_SHARE_PROJECT_CONFIGURATION_FILES": "true",
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "SHELLCHECK.PATH": "C:\\Users\\Admin\\AppData\\Roaming\\JetBrains\\PyCharm2025.1\\plugins\\Shell Script\\shellcheck.exe",
+    "git-widget-placeholder": "master",
+    "last_opened_file_path": "C:/Users/Admin/PycharmProjects/Banking_Compliance_app",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "vue.rearranger.settings.migration": "true"
   },
-  &quot;keyToStringList&quot;: {
-    &quot;DatabaseDriversLRU&quot;: [
-      &quot;azure&quot;
+  "keyToStringList": {
+    "DatabaseDriversLRU": [
+      "azure"
     ]
   }
-}</component>
+}]]></component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
@@ -154,7 +153,15 @@
       <option name="project" value="LOCAL" />
       <updated>1747981242050</updated>
     </task>
-    <option name="localTasksCounter" value="6" />
+    <task id="LOCAL-00006" summary="kubernetes files">
+      <option name="closed" value="true" />
+      <created>1747983286593</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1747983286593</updated>
+    </task>
+    <option name="localTasksCounter" value="7" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -175,6 +182,7 @@
     <MESSAGE value="updated sqlbot and chatbot and some changes in dormant.py" />
     <MESSAGE value="updated dormant.py" />
     <MESSAGE value="updated banking compliance code" />
-    <option name="LAST_COMMIT_MESSAGE" value="updated banking compliance code" />
+    <MESSAGE value="kubernetes files" />
+    <option name="LAST_COMMIT_MESSAGE" value="kubernetes files" />
   </component>
 </project>

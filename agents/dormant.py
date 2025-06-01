@@ -12,47 +12,63 @@ ELIGIBILITY_FOR_CB_TRANSFER_YEARS = 5
 def check_safe_deposit_dormancy(df, report_date):
     """
     Identifies Safe Deposit Boxes meeting dormancy criteria (Art. 2.6 CBUAE).
-    Criteria: Charges outstanding > 3 years, and no reply from tenant to bank's communication.
-    Uses: Account_Type, SDB_Charges_Outstanding, Date_SDB_Charges_Became_Outstanding,
-          SDB_Tenant_Communication_Received, Bank_Contact_Attempted_Post_Dormancy_Trigger (implicitly)
+    Criteria:
+        - Account_Type == 'safe_deposit_box'
+        - Charges outstanding ('yes' or numeric > 0) for > 3 years
+        - No reply from tenant (values like 'no', '', 'nan', or NaN)
+    Columns used:
+        - Account_Type
+        - SDB_Charges_Outstanding
+        - Date_SDB_Charges_Became_Outstanding
+        - SDB_Tenant_Communication_Received
     """
     try:
         required_columns = [
             'Account_ID', 'Account_Type', 'SDB_Charges_Outstanding',
-            'Date_SDB_Charges_Became_Outstanding', 'SDB_Tenant_Communication_Received',
-            # 'Bank_Contact_Attempted_Post_Dormancy_Trigger' # Assuming bank *would* attempt if SDB becomes an issue.
-            # Art 2.6 focuses on tenant's reply.
+            'Date_SDB_Charges_Became_Outstanding', 'SDB_Tenant_Communication_Received'
         ]
         if not all(col in df.columns for col in required_columns):
             missing_cols = [col for col in required_columns if col not in df.columns]
             return pd.DataFrame(), 0, f"(Skipped SDB Dormancy: Missing {', '.join(missing_cols)})", {}
 
         # Ensure date column is in datetime format
-        if not pd.api.types.is_datetime64_dtype(df['Date_SDB_Charges_Became_Outstanding']):
-            df['Date_SDB_Charges_Became_Outstanding'] = pd.to_datetime(df['Date_SDB_Charges_Became_Outstanding'],
-                                                                       errors='coerce')
+        if not pd.api.types.is_datetime64_any_dtype(df['Date_SDB_Charges_Became_Outstanding']):
+            df['Date_SDB_Charges_Became_Outstanding'] = pd.to_datetime(
+                df['Date_SDB_Charges_Became_Outstanding'], errors='coerce'
+            )
 
-        threshold_date_sdb = report_date - timedelta(days=SDB_UNPAID_FEES_YEARS * 365)
+        # Threshold is 3 years (1095 days) before report date
+        threshold_date_sdb = report_date - timedelta(days=3 * 365)
 
-        data = df[
-            (df['Account_Type'].astype(str).str.contains("Safe Deposit", case=False, na=False)) &
-            (pd.to_numeric(df['SDB_Charges_Outstanding'], errors='coerce').fillna(0) > 0) &
+        # Charges outstanding: allow "yes" or any numeric > 0
+        mask_charges = (
+            (df['SDB_Charges_Outstanding'].astype(str).str.lower() == "yes") |
+            (pd.to_numeric(df['SDB_Charges_Outstanding'], errors='coerce').fillna(0) > 0)
+        )
+
+        # Tenant communication: allow 'no', '', 'nan', or NaN
+        mask_no_reply = (
+            (df['SDB_Tenant_Communication_Received'].astype(str).str.lower().isin(['no', '', 'nan'])) |
+            (df['SDB_Tenant_Communication_Received'].isna())
+        )
+
+        mask = (
+            (df['Account_Type'].astype(str).str.lower() == "safe_deposit_box") &
+            mask_charges &
             (df['Date_SDB_Charges_Became_Outstanding'].notna()) &
             (df['Date_SDB_Charges_Became_Outstanding'] < threshold_date_sdb) &
-            # Art 2.6: "the Bank has not received a reply from the Safe Deposit Box tenant"
-            (df['SDB_Tenant_Communication_Received'].astype(str).str.lower().isin(['no', 'false', '0', 'nan', '']))
-            ].copy()  # Use .copy()
+            mask_no_reply
+        )
 
+        data = df[mask].copy()
         count = len(data)
-        desc = f"Safe Deposit Boxes meeting dormancy criteria (Art 2.6: >{SDB_UNPAID_FEES_YEARS}yr unpaid, no tenant reply): {count} boxes"
+        desc = (
+            f"Safe Deposit Boxes meeting dormancy criteria (Art 2.6: >3yr unpaid, no tenant reply): {count} boxes"
+        )
         details = {
-            "average_outstanding_charges": pd.to_numeric(data['SDB_Charges_Outstanding'],
-                                                         errors='coerce').mean() if count else 0,
-            "total_outstanding_charges": pd.to_numeric(data['SDB_Charges_Outstanding'],
-                                                       errors='coerce').sum() if count else 0,
-            "earliest_charge_outstanding_date": str(
-                data['Date_SDB_Charges_Became_Outstanding'].min().date()) if count and pd.notna(
-                data['Date_SDB_Charges_Became_Outstanding'].min()) else "N/A",
+            "average_outstanding_charges": pd.to_numeric(data['SDB_Charges_Outstanding'], errors='coerce').mean() if count else 0,
+            "total_outstanding_charges": pd.to_numeric(data['SDB_Charges_Outstanding'], errors='coerce').sum() if count else 0,
+            "earliest_charge_outstanding_date": str(data['Date_SDB_Charges_Became_Outstanding'].min().date()) if count and pd.notna(data['Date_SDB_Charges_Became_Outstanding'].min()) else "N/A",
             "sample_accounts": data['Account_ID'].head(3).tolist() if count else []
         }
         return data, count, desc, details
