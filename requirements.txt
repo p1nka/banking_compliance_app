@@ -35,3 +35,9 @@ reportlab>=4.0.0
 
 # Authentication
 cryptography>=41.0.0
+
+# Database drivers for cloud compatibility
+pymssql
+sqlalchemy
+# Backup option if pymssql fails
+psycopg2-binary
