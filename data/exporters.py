@@ -1,94 +1,189 @@
+"""
+Data export utilities for the banking compliance application.
+"""
 import streamlit as st
 import pandas as pd
+from fpdf2 import FPDF
+from io import BytesIO
+import base64
 from datetime import datetime
-from fpdf import FPDF
 
 
-def generate_pdf_report(title, sections):
+def download_csv_button(df, filename="data_export.csv", button_text="Download CSV"):
     """
-    Generate a PDF report with multiple sections.
-
+    Create a download button for CSV data.
+    
     Args:
-        title (str): The title of the report
-        sections (list): List of dictionaries containing section data
-                         Each dict should have 'title' and 'content' keys
-
-    Returns:
-        bytes: PDF data that can be used with st.download_button
+        df (pd.DataFrame): Data to export
+        filename (str): Name of the downloaded file
+        button_text (str): Text to display on the button
     """
-    pdf = FPDF()
-    pdf.add_page()
-
-    # Add title
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, title, 0, 1, 'C')
-    pdf.ln(5)
-
-    # Add each section
-    for section in sections:
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 10, section.get('title', 'Section'), 0, 1)
-
-        pdf.set_font("Arial", size=10)
-        content = section.get('content', '')
-        # Encode to latin-1 to handle most common characters
-        # This is a limitation of FPDF, consider using FPDF2 for better unicode support
-        safe_content = content.encode('latin-1', 'replace').decode('latin-1')
-        pdf.multi_cell(0, 6, safe_content)
-        pdf.ln(5)
-
-    # Return PDF as bytes
-    return pdf.output(dest='S').encode('latin-1')
-
-
-def download_pdf_button(title, sections, filename=None):
-    """
-    Create a download button for a PDF report.
-
-    Args:
-        title (str): The title of the report
-        sections (list): List of dictionaries containing section data
-        filename (str, optional): Custom filename. If None, a timestamped name will be used.
-    """
-    if filename is None:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"{title.lower().replace(' ', '_')}_{timestamp}.pdf"
-
-    try:
-        pdf_data = generate_pdf_report(title, sections)
-        st.download_button(
-            label="Click to Download PDF",
-            data=pdf_data,
-            file_name=filename,
-            mime="application/pdf"
-        )
-    except Exception as e:
-        st.error(f"Error generating PDF: {e}")
-
-
-def download_csv_button(df, filename=None):
-    """
-    Create a download button for a CSV file from a DataFrame.
-
-    Args:
-        df (pandas.DataFrame): The DataFrame to export
-        filename (str, optional): Custom filename. If None, a timestamped name will be used.
-    """
-    if df is None or df.empty:
-        st.warning("No data available to download.")
-        return
-
-    if filename is None:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"exported_data_{timestamp}.csv"
-
-    try:
+    if df is not None and not df.empty:
         csv_data = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="Download as CSV",
+            label=button_text,
             data=csv_data,
             file_name=filename,
             mime="text/csv"
         )
+    else:
+        st.warning("No data available for CSV export")
+
+
+def download_pdf_button(title, sections, filename="report.pdf", button_text="Download PDF Report"):
+    """
+    Create a download button for PDF reports.
+    
+    Args:
+        title (str): Report title
+        sections (list): List of dictionaries with 'title' and 'content' keys
+        filename (str): Name of the downloaded file
+        button_text (str): Text to display on the button
+    """
+    try:
+        # Create PDF
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font('Arial', 'B', 16)
+        
+        # Add title
+        pdf.cell(0, 10, title, ln=True, align='C')
+        pdf.ln(10)
+        
+        # Add sections
+        for section in sections:
+            # Section title
+            pdf.set_font('Arial', 'B', 12)
+            pdf.cell(0, 10, section.get('title', 'Section'), ln=True)
+            pdf.ln(5)
+            
+            # Section content
+            pdf.set_font('Arial', '', 10)
+            content = section.get('content', '')
+            
+            # Handle long content by splitting into lines
+            lines = content.split('\n')
+            for line in lines:
+                # Wrap long lines
+                if len(line) > 80:
+                    words = line.split(' ')
+                    current_line = ''
+                    for word in words:
+                        if len(current_line + word) < 80:
+                            current_line += word + ' '
+                        else:
+                            if current_line:
+                                pdf.cell(0, 5, current_line.strip(), ln=True)
+                            current_line = word + ' '
+                    if current_line:
+                        pdf.cell(0, 5, current_line.strip(), ln=True)
+                else:
+                    pdf.cell(0, 5, line, ln=True)
+            
+            pdf.ln(5)
+        
+        # Generate PDF data
+        pdf_data = pdf.output(dest='S').encode('latin1')
+        
+        # Create download button
+        st.download_button(
+            label=button_text,
+            data=pdf_data,
+            file_name=filename,
+            mime="application/pdf"
+        )
+        
     except Exception as e:
-        st.error(f"Error generating CSV: {e}")
+        st.error(f"Error generating PDF: {e}")
+        st.warning("PDF generation failed. You can copy the text content instead.")
+
+
+def create_excel_download(df, filename="data_export.xlsx", sheet_name="Data"):
+    """
+    Create an Excel download button.
+    
+    Args:
+        df (pd.DataFrame): Data to export
+        filename (str): Name of the downloaded file
+        sheet_name (str): Name of the Excel sheet
+    """
+    if df is not None and not df.empty:
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        excel_data = output.getvalue()
+        
+        st.download_button(
+            label="Download Excel",
+            data=excel_data,
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.warning("No data available for Excel export")
+
+
+def export_data_summary(data_dict, title="Data Summary"):
+    """
+    Export a summary of multiple datasets.
+    
+    Args:
+        data_dict (dict): Dictionary with dataset names as keys and DataFrames as values
+        title (str): Title for the summary
+    """
+    summary_sections = []
+    
+    # Add overview section
+    overview = f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    overview += f"Number of datasets: {len(data_dict)}\n\n"
+    
+    for name, df in data_dict.items():
+        if df is not None and not df.empty:
+            overview += f"- {name}: {len(df)} records, {len(df.columns)} columns\n"
+        else:
+            overview += f"- {name}: No data\n"
+    
+    summary_sections.append({
+        "title": "Overview",
+        "content": overview
+    })
+    
+    # Add detailed sections for each dataset
+    for name, df in data_dict.items():
+        if df is not None and not df.empty:
+            content = f"Records: {len(df)}\n"
+            content += f"Columns: {', '.join(df.columns)}\n\n"
+            
+            # Add basic statistics for numeric columns
+            numeric_cols = df.select_dtypes(include=['number']).columns
+            if len(numeric_cols) > 0:
+                content += "Numeric Summary:\n"
+                for col in numeric_cols[:5]:  # Limit to first 5 numeric columns
+                    content += f"- {col}: Mean={df[col].mean():.2f}, "
+                    content += f"Min={df[col].min():.2f}, Max={df[col].max():.2f}\n"
+            
+            summary_sections.append({
+                "title": f"Dataset: {name}",
+                "content": content
+            })
+    
+    # Create download buttons
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        download_pdf_button(title, summary_sections, f"{title.replace(' ', '_').lower()}_summary.pdf")
+    
+    with col2:
+        if data_dict:
+            # Create a combined CSV with all datasets
+            combined_data = []
+            for name, df in data_dict.items():
+                if df is not None and not df.empty:
+                    df_copy = df.copy()
+                    df_copy['Dataset'] = name
+                    combined_data.append(df_copy)
+            
+            if combined_data:
+                combined_df = pd.concat(combined_data, ignore_index=True)
+                download_csv_button(combined_df, f"{title.replace(' ', '_').lower()}_combined.csv", "Download Combined CSV")
