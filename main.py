@@ -130,13 +130,13 @@ if check_password():
     from config import SESSION_COLUMN_MAPPING, SESSION_APP_DF, SESSION_DATA_PROCESSED
 
     if SESSION_COLUMN_MAPPING not in st.session_state:
-    st.session_state[SESSION_COLUMN_MAPPING] = {}
+        st.session_state[SESSION_COLUMN_MAPPING] = {}
     
     if SESSION_APP_DF not in st.session_state:
-    st.session_state[SESSION_APP_DF] = None
+        st.session_state[SESSION_APP_DF] = None
     
     if SESSION_DATA_PROCESSED not in st.session_state:
-    st.session_state[SESSION_DATA_PROCESSED] = False
+        st.session_state[SESSION_DATA_PROCESSED] = False
     # Now import UI modules
     from ui.sidebar import render_sidebar
     from ui.dormant_ui import render_dormant_analyzer
