@@ -24,6 +24,9 @@ plotly>=5.17.0
 # HTTP Requests
 requests>=2.31.0
 
+# PDF generation - use specific version
+fpdf2==2.7.6
+
 # Utilities
 python-dotenv>=1.0.0
 
