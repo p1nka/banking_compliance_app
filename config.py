@@ -21,19 +21,19 @@ DB_DRIVER = os.getenv("DB_DRIVER", "{ODBC Driver 18 for SQL Server}")
 
 # AI Model configuration
 AI_MODEL_PROVIDER = os.getenv("AI_MODEL_PROVIDER", "groq")
-AI_MODEL_NAME = os.getenv("AI_MODEL_NAME", "llama3-70b-8192")
+AI_MODEL_NAME = os.getenv("AI_MODEL_NAME", "llama3.3-70b-versatile")
 AI_API_KEY = os.getenv("AI_API_KEY", "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")
 
 # Application configuration
 APP_NAME = "Banking Compliance Assistant"
 APP_VERSION = "1.0.0"
-APP_TITLE = os.getenv("APP_TITLE", "Banking Compliance Assistant")
-APP_DESCRIPTION = "AI-powered banking compliance and data analysis tool"
+APP_TITLE = os.getenv("APP_TITLE", "Internal Audit Bot")
+APP_DESCRIPTION = "AI Powered Internal Audit and Banking Compliance Bot"
 # Application constants
 
 APP_SUBTITLE = """
-This tool helps identify dormant accounts and analyze compliance requirements 
-according to banking regulations.
+This Bot helps identify dormant accounts and analyze compliance requirements 
+according to Central Bank of UAE regulations.
 """
 
 import streamlit as st
@@ -47,10 +47,10 @@ ENABLE_VISUALIZATION = os.getenv("ENABLE_VISUALIZATION", "true").lower() == "tru
 MAX_QUERIES_PER_DAY = int(os.getenv("MAX_QUERIES_PER_DAY", "100"))
 MAX_AI_TOKENS = int(os.getenv("MAX_AI_TOKENS", "6000"))
 # Application constants
-APP_TITLE = "Banking Compliance Analysis Tool"
+APP_TITLE = "Internal Audit Bot"
 APP_SUBTITLE = """
-This tool helps identify dormant accounts and analyze compliance requirements 
-according to banking regulations.
+This bot helps identify dormant accounts and analyze compliance requirements 
+according to Central Bank of UAE regulations.
 """
 
 # Session state keys

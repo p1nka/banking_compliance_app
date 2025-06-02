@@ -38,7 +38,7 @@ def render_compliance_analyzer(df, agent_name_input, llm):
     """
     Main function to render the Compliance Audit Analyzer UI.
     """
-    st.header("🛡️ Compliance Audit Analyzer (CBUAE)")
+    st.header("Dormant Compliance Audit Analyzer (CBUAE)")
 
     agent_options_compliance = [
         "📊 Summarized Compliance Audit (All Checks)",
@@ -47,7 +47,7 @@ def render_compliance_analyzer(df, agent_name_input, llm):
         "FLAG: Flag Candidates (Not Yet Flagged)",
         "LEDGER: Internal Ledger Candidates (Art. 3.5)",
         "FREEZE: Statement Freeze Needed (Art. 7.3)",
-        "CB_TRANSFER: CBUAE Transfer Candidates (Art. 8)",
+        "CB_TRANSFER: CBUAE Transfer C andidates (Art. 8)",
         "FX_CONV: Foreign Currency Conversion for CB Transfer",
         "SDB_APP: SDB Court Application Needed",
         "PI_LEDGER: Unclaimed Instruments for Internal Ledger",

@@ -509,9 +509,10 @@ def render_app_modes():
         "Select Application Mode",
         [
             "🏦 Dormant Account Analyzer",
-            "🔒 Compliance Analyzer",
-            "🔍 SQL Bot",
-            "💬 Chatbot Only"
+            "🔒 Dormant Compliance Analyzer",
+            "💬 Chatbot Only",
+            "🔍 SQL Bot"
+
         ],
         key="app_mode_selector"
     )

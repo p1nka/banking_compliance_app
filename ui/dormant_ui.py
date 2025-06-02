@@ -36,7 +36,7 @@ def render_dormant_analyzer(df, report_date_str, llm, dormant_flags_history_df):
     """
     Main function to render the Dormant Account Analyzer UI.
     """
-    st.header("🇦🇪 Dormant Account Identification (CBUAE)")
+    st.header("Dormant Account Identification (CBUAE)")
 
     agent_options_dormant = [
         "📊 Summarized Dormancy Analysis (All Checks)",
@@ -66,9 +66,12 @@ def render_dormant_analyzer(df, report_date_str, llm, dormant_flags_history_df):
 
 # --- Summarized View ---
 def render_summarized_dormant_analysis_view(df, report_date_str, llm, dormant_flags_history_df):
-    st.subheader("📈 Summarized Dormancy Identification Results")
+    """
+    Enhanced summarized view that includes comprehensive details from all dormant agents
+    """
+    st.subheader("📈 Comprehensive Dormancy Identification Summary")
 
-    if st.button("🚀 Run Summarized Dormancy Analysis", key="run_summary_dormant_analysis_button"):
+    if st.button("🚀 Run Complete Dormancy Analysis", key="run_summary_dormant_analysis_button"):
         with st.spinner("Running all dormancy identification checks..."):
             results = run_all_dormant_identification_checks(
                 df.copy(),
@@ -76,76 +79,386 @@ def render_summarized_dormant_analysis_view(df, report_date_str, llm, dormant_fl
                 dormant_flags_history_df=dormant_flags_history_df
             )
         st.session_state.dormant_summary_results_ui = results
-        st.toast("Summarized dormancy analysis complete!", icon="✅")
+        st.toast("Complete dormancy analysis finished!", icon="✅")
 
     if 'dormant_summary_results_ui' in st.session_state:
         results = st.session_state.dormant_summary_results_ui
         summary_kpis = results.get("summary_kpis", {})
 
-        st.markdown(f"**Report Date Used:** `{results.get('report_date_used', 'N/A')}` | **Total Accounts Analyzed:** `{results.get('total_accounts_analyzed', 'N/A')}`")
+        # Header Information
+        st.markdown("---")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📅 Report Date", results.get('report_date_used', 'N/A'))
+        with col2:
+            st.metric("🏦 Total Accounts", results.get('total_accounts_analyzed', 'N/A'))
+        with col3:
+            st.metric("🚩 Total Flagged Dormant", summary_kpis.get("total_accounts_flagged_dormant", 0))
 
-        st.subheader("Key Performance Indicators (KPIs)")
-        cols_kpi = st.columns(3)
-        cols_kpi[0].metric("Total Accounts Flagged Dormant", summary_kpis.get("total_accounts_flagged_dormant", 0))
-        cols_kpi[1].metric("% Dormant of Total", f"{summary_kpis.get('percentage_dormant_of_total', 0):.2f}%")
-        cols_kpi[2].metric("Total Dormant Balance (AED)", f"{summary_kpis.get('total_dormant_balance_aed', 0):,.2f}" if isinstance(summary_kpis.get('total_dormant_balance_aed'), (int, float)) else summary_kpis.get('total_dormant_balance_aed', "N/A"))
+        # Key Performance Indicators
+        st.subheader("🎯 Key Performance Indicators")
+        kpi_cols = st.columns(4)
 
-        # --- Charts for Summary ---
-        st.subheader("Visual Insights")
-        # Chart 1: Dormancy Categories Count
-        dormancy_counts_data = {
-            "SDB": summary_kpis.get("count_sdb_dormant", 0),
-            "Investment": summary_kpis.get("count_investment_dormant", 0),
-            "Fixed Deposit": summary_kpis.get("count_fixed_deposit_dormant", 0),
-            "Demand Deposit": summary_kpis.get("count_demand_deposit_dormant", 0),
-            "Unclaimed PI": summary_kpis.get("count_unclaimed_instruments", 0),
+        with kpi_cols[0]:
+            st.metric(
+                "Dormancy Rate",
+                f"{summary_kpis.get('percentage_dormant_of_total', 0):.2f}%",
+                help="Percentage of total accounts flagged as dormant"
+            )
+
+        with kpi_cols[1]:
+            balance_value = summary_kpis.get('total_dormant_balance_aed', 0)
+            if isinstance(balance_value, (int, float)):
+                st.metric("Total Dormant Balance", f"AED {balance_value:,.0f}")
+            else:
+                st.metric("Total Dormant Balance", str(balance_value))
+
+        with kpi_cols[2]:
+            st.metric(
+                "High-Value Dormant",
+                summary_kpis.get("count_high_value_dormant", 0),
+                help="Accounts with balance ≥ AED 25,000"
+            )
+
+        with kpi_cols[3]:
+            st.metric(
+                "CB Transfer Eligible",
+                summary_kpis.get("count_eligible_for_cb_transfer", 0),
+                help="Accounts eligible for Central Bank transfer"
+            )
+
+        # Detailed Agent Results
+        st.subheader("🔍 Detailed Analysis by Dormancy Category")
+
+        # Create agent summary data
+        agent_summary = {
+            "Safe Deposit Boxes (Art 2.6)": {
+                "count": results["sdb_dormant"]["count"],
+                "desc": results["sdb_dormant"]["desc"],
+                "details": results["sdb_dormant"]["details"],
+                "icon": "🏦",
+                "color": "red" if results["sdb_dormant"]["count"] > 0 else "gray"
+            },
+            "Investment Accounts (Art 2.3)": {
+                "count": results["investment_dormant"]["count"],
+                "desc": results["investment_dormant"]["desc"],
+                "details": results["investment_dormant"]["details"],
+                "icon": "📈",
+                "color": "orange" if results["investment_dormant"]["count"] > 0 else "gray"
+            },
+            "Fixed Deposits (Art 2.2)": {
+                "count": results["fixed_deposit_dormant"]["count"],
+                "desc": results["fixed_deposit_dormant"]["desc"],
+                "details": results["fixed_deposit_dormant"]["details"],
+                "icon": "💰",
+                "color": "yellow" if results["fixed_deposit_dormant"]["count"] > 0 else "gray"
+            },
+            "Demand Deposits (Art 2.1.1)": {
+                "count": results["demand_deposit_dormant"]["count"],
+                "desc": results["demand_deposit_dormant"]["desc"],
+                "details": results["demand_deposit_dormant"]["details"],
+                "icon": "💳",
+                "color": "blue" if results["demand_deposit_dormant"]["count"] > 0 else "gray"
+            },
+            "Unclaimed Payment Instruments (Art 2.4)": {
+                "count": results["unclaimed_instruments"]["count"],
+                "desc": results["unclaimed_instruments"]["desc"],
+                "details": results["unclaimed_instruments"]["details"],
+                "icon": "📄",
+                "color": "purple" if results["unclaimed_instruments"]["count"] > 0 else "gray"
+            }
         }
-        dormancy_counts_df = pd.DataFrame(list(dormancy_counts_data.items()), columns=['Category', 'Count']).set_index('Category')
-        if not dormancy_counts_df.empty:
-            st.bar_chart(dormancy_counts_df, height=300)
-        else:
-            st.info("No data for dormancy category chart.")
 
-        # Prepare text for AI summary
-        summary_input_text = f"Dormancy Analysis Report (Date: {results.get('report_date_used')}, Total Analyzed: {results.get('total_accounts_analyzed')})\n"
-        for key, val_dict in results.items():
-            if isinstance(val_dict, dict) and "desc" in val_dict and "count" in val_dict:
-                 if not val_dict["desc"].startswith("(Skipped"): # Avoid adding skipped checks to AI summary
-                    summary_input_text += f"- {val_dict['desc']}\n"
-        summary_input_text += "\nSummary KPIs:\n"
-        for k,v in summary_kpis.items():
-            summary_input_text += f"  - {k.replace('_', ' ').title()}: {v}\n"
+        # Display agent results in expandable sections
+        for agent_name, agent_data in agent_summary.items():
+            with st.expander(f"{agent_data['icon']} {agent_name} - {agent_data['count']} items",
+                             expanded=agent_data['count'] > 0):
 
+                col_desc, col_metric = st.columns([3, 1])
+                with col_desc:
+                    if not agent_data['desc'].startswith("(Skipped"):
+                        st.write(agent_data['desc'])
+                    else:
+                        st.warning(agent_data['desc'])
 
-        st.subheader("📝 AI Generated Summary & Insights")
+                with col_metric:
+                    st.metric("Count", agent_data['count'])
+
+                # Show details if available (excluding sample accounts)
+                if agent_data['details'] and agent_data['count'] > 0:
+                    st.markdown("**Additional Details:**")
+                    # Filter out sample accounts from details
+                    filtered_details = {k: v for k, v in agent_data['details'].items()
+                                        if 'sample' not in k.lower()}
+
+                    if filtered_details:
+                        detail_cols = st.columns(len(filtered_details))
+                        for i, (key, value) in enumerate(filtered_details.items()):
+                            if i < len(detail_cols):
+                                with detail_cols[i]:
+                                    if isinstance(value, (int, float)):
+                                        if 'amount' in key.lower() or 'balance' in key.lower():
+                                            st.metric(key.replace('_', ' ').title(), f"AED {value:,.0f}")
+                                        else:
+                                            st.metric(key.replace('_', ' ').title(), f"{value:,.0f}")
+                                    else:
+                                        st.metric(key.replace('_', ' ').title(), str(value))
+
+        # Process & Action Items
+        st.subheader("⚡ Process & Action Items")
+
+        action_cols = st.columns(3)
+
+        with action_cols[0]:
+            st.metric(
+                "🔄 Article 3 Process Needed",
+                summary_kpis.get("count_needing_art3_process", 0),
+                help="Accounts requiring contact/wait period process"
+            )
+            if summary_kpis.get("count_needing_art3_process", 0) > 0:
+                art3_details = results["art3_process_needed"]["details"]
+                st.caption(f"• Needs initial contact: {art3_details.get('needs_initial_contact', 0)}")
+                st.caption(f"• In 3-month wait: {art3_details.get('in_3_month_wait_period', 0)}")
+
+        with action_cols[1]:
+            st.metric(
+                "📞 Proactive Contact Needed",
+                summary_kpis.get("count_needing_proactive_contact", 0),
+                help="Accounts nearing dormancy requiring preventive contact"
+            )
+
+        with action_cols[2]:
+            st.metric(
+                "🔄 Dormant-to-Active Transitions",
+                summary_kpis.get("count_dormant_to_active_transitions", 0),
+                help="Previously dormant accounts showing recent activity"
+            )
+
+        # Visual Charts with Pie Charts
+        st.subheader("📊 Visual Analytics")
+
+        chart_col1, chart_col2 = st.columns(2)
+
+        with chart_col1:
+            st.markdown("**Dormancy by Category**")
+            dormancy_data = {
+                "Safe Deposit": summary_kpis.get("count_sdb_dormant", 0),
+                "Investment": summary_kpis.get("count_investment_dormant", 0),
+                "Fixed Deposit": summary_kpis.get("count_fixed_deposit_dormant", 0),
+                "Demand Deposit": summary_kpis.get("count_demand_deposit_dormant", 0),
+                "Unclaimed Instruments": summary_kpis.get("count_unclaimed_instruments", 0),
+            }
+
+            chart_df = pd.DataFrame(list(dormancy_data.items()), columns=['Category', 'Count'])
+            chart_df = chart_df[chart_df['Count'] > 0]  # Only show categories with data
+
+            if not chart_df.empty:
+                try:
+                    import plotly.express as px
+                    fig1 = px.pie(chart_df, values='Count', names='Category',
+                                  title='Distribution of Dormant Accounts by Category',
+                                  color_discrete_sequence=px.colors.qualitative.Set3)
+                    fig1.update_traces(textposition='inside', textinfo='percent+label')
+                    fig1.update_layout(height=400, showlegend=True, legend=dict(orientation="v", x=1.05))
+                    st.plotly_chart(fig1, use_container_width=True)
+                except ImportError:
+                    # Fallback to bar chart if plotly not available
+                    st.bar_chart(chart_df.set_index('Category'), height=300)
+            else:
+                st.info("No dormant accounts identified across categories.")
+
+        with chart_col2:
+            st.markdown("**Process Status Overview**")
+            process_data = {
+                "CB Transfer Eligible": summary_kpis.get("count_eligible_for_cb_transfer", 0),
+                "Article 3 Process": summary_kpis.get("count_needing_art3_process", 0),
+                "Proactive Contact": summary_kpis.get("count_needing_proactive_contact", 0),
+                "High Value (≥25k)": summary_kpis.get("count_high_value_dormant", 0),
+                "Reactivated": summary_kpis.get("count_dormant_to_active_transitions", 0),
+            }
+
+            process_df = pd.DataFrame(list(process_data.items()), columns=['Status', 'Count'])
+            process_df = process_df[process_df['Count'] > 0]
+
+            if not process_df.empty:
+                try:
+                    import plotly.express as px
+                    fig2 = px.pie(process_df, values='Count', names='Status',
+                                  title='Distribution of Process Status Items',
+                                  color_discrete_sequence=px.colors.qualitative.Pastel)
+                    fig2.update_traces(textposition='inside', textinfo='percent+label')
+                    fig2.update_layout(height=400, showlegend=True, legend=dict(orientation="v", x=1.05))
+                    st.plotly_chart(fig2, use_container_width=True)
+                except ImportError:
+                    # Fallback to bar chart if plotly not available
+                    st.bar_chart(process_df.set_index('Status'), height=300)
+            else:
+                st.info("No process-specific items identified.")
+
+        # Prepare comprehensive text for AI analysis
+        # Format balance values properly
+        total_balance = summary_kpis.get('total_dormant_balance_aed', 0)
+        total_balance_formatted = f"AED {total_balance:,.0f}" if isinstance(total_balance, (int, float)) else str(
+            total_balance)
+
+        high_value_balance = summary_kpis.get('total_high_value_dormant_balance_aed', 0)
+        high_value_balance_formatted = f"AED {high_value_balance:,.0f}" if isinstance(high_value_balance,
+                                                                                      (int, float)) else str(
+            high_value_balance)
+
+        comprehensive_summary = f"""
+DORMANCY ANALYSIS COMPREHENSIVE REPORT
+=====================================
+Report Date: {results.get('report_date_used')}
+Total Accounts Analyzed: {results.get('total_accounts_analyzed')}
+
+EXECUTIVE SUMMARY:
+- Total Dormant Accounts: {summary_kpis.get('total_accounts_flagged_dormant', 0)} ({summary_kpis.get('percentage_dormant_of_total', 0):.2f}%)
+- Total Dormant Balance: {total_balance_formatted}
+- High-Value Dormant: {summary_kpis.get('count_high_value_dormant', 0)} accounts ({high_value_balance_formatted})
+
+DETAILED FINDINGS BY CATEGORY:
+"""
+
+        for category, data in agent_summary.items():
+            if not data['desc'].startswith("(Skipped"):
+                comprehensive_summary += f"\n{category}:\n- {data['desc']}\n"
+                if data['details']:
+                    # Filter out sample accounts from comprehensive summary
+                    filtered_details = {k: v for k, v in data['details'].items()
+                                        if 'sample' not in k.lower()}
+                    for key, value in filtered_details.items():
+                        comprehensive_summary += f"  - {key.replace('_', ' ').title()}: {value}\n"
+
+        comprehensive_summary += f"""
+PROCESS & ACTION ITEMS:
+- Article 3 Process Required: {summary_kpis.get('count_needing_art3_process', 0)} accounts
+- Proactive Contact Needed: {summary_kpis.get('count_needing_proactive_contact', 0)} accounts  
+- Central Bank Transfer Eligible: {summary_kpis.get('count_eligible_for_cb_transfer', 0)} items
+- Dormant-to-Active Transitions: {summary_kpis.get('count_dormant_to_active_transitions', 0)} accounts
+
+FINANCIAL IMPACT:
+- Total Unclaimed Instruments Value: AED {summary_kpis.get('total_unclaimed_instruments_value', 0):,.0f}
+- High-Value Dormant Balance: {high_value_balance_formatted}
+"""
+
+        # AI-Generated Executive Summary
+        st.subheader("🤖 AI-Generated Executive Summary & Strategic Insights")
+
         if llm:
             try:
-                with st.spinner("Generating AI summary for all dormancy checks..."):
+                with st.spinner("Generating comprehensive AI analysis..."):
                     prompt_template = PromptTemplate.from_template(DORMANT_SUMMARY_PROMPT)
                     chain = prompt_template | llm | StrOutputParser()
-                    ai_summary = chain.invoke({"analysis_details": summary_input_text})
+                    ai_summary = chain.invoke({"analysis_details": comprehensive_summary})
+
                 st.markdown(ai_summary)
                 st.session_state.dormant_ai_summary_text_ui = ai_summary
+
+                # Save to database if function exists
+                try:
+                    save_summary_to_db("dormant_analysis", ai_summary, results.get('report_date_used'))
+                    st.success("Analysis saved to database!")
+                except:
+                    pass  # Silently continue if save function not available
+
             except Exception as e:
                 st.error(f"AI summary generation failed: {e}")
-                st.session_state.dormant_ai_summary_text_ui = get_fallback_response("dormant_summary") + f"\n\nRaw Data:\n{summary_input_text}"
-                st.warning(st.session_state.dormant_ai_summary_text_ui)
+                fallback_summary = get_fallback_response("dormant_summary")
+                st.session_state.dormant_ai_summary_text_ui = f"{fallback_summary}\n\n{comprehensive_summary}"
+                st.warning("Using fallback summary due to AI service unavailability.")
+                st.text_area("Detailed Analysis", comprehensive_summary, height=300)
         else:
-            st.warning("LLM not available. Displaying raw findings.")
-            st.text_area("Raw Findings for Summary", summary_input_text, height=200)
-            st.session_state.dormant_ai_summary_text_ui = summary_input_text
+            st.warning("LLM not available. Displaying comprehensive raw analysis.")
+            st.text_area("Comprehensive Analysis Details", comprehensive_summary, height=400)
+            st.session_state.dormant_ai_summary_text_ui = comprehensive_summary
 
-        # --- Export Options for Summary ---
-        st.subheader("⬇️ Export Summarized Report")
-        summary_report_sections = [
-            {"title": "Dormancy Analysis Overview", "content": summary_input_text},
-            {"title": "AI Generated Summary", "content": st.session_state.get("dormant_ai_summary_text_ui", "AI Summary not generated.")}
-        ]
-        download_pdf_button("Dormancy_Analysis_Summary_Report", summary_report_sections, "dormancy_summary_report.pdf")
+        # Export Options
+        st.subheader("📥 Export Comprehensive Report")
 
-        with st.expander("View Raw Results for All Dormancy Checks"):
-            st.json(results, expanded=False)
+        export_col1, export_col2 = st.columns(2)
 
+        with export_col1:
+            # PDF Export
+            comprehensive_report_sections = [
+                {"title": "Executive Summary",
+                 "content": f"Total Accounts: {results.get('total_accounts_analyzed')}\nDormant Accounts: {summary_kpis.get('total_accounts_flagged_dormant', 0)}\nDormancy Rate: {summary_kpis.get('percentage_dormant_of_total', 0):.2f}%"},
+                {"title": "Detailed Analysis", "content": comprehensive_summary},
+                {"title": "AI Strategic Insights",
+                 "content": st.session_state.get("dormant_ai_summary_text_ui", "AI Summary not available.")},
+                {"title": "Raw Data Summary", "content": str(summary_kpis)}
+            ]
+            download_pdf_button(
+                "Comprehensive_Dormancy_Analysis_Report",
+                comprehensive_report_sections,
+                "comprehensive_dormancy_report.pdf"
+            )
+
+        with export_col2:
+            # CSV Export of all identified dormant accounts
+            if summary_kpis.get("total_accounts_flagged_dormant", 0) > 0:
+                all_dormant_accounts = df[
+                    df.get('Expected_Account_Dormant', pd.Series(dtype=str)).astype(str).str.lower().isin(
+                        ['yes', 'true', '1'])]
+                if not all_dormant_accounts.empty:
+                    download_csv_button(
+                        all_dormant_accounts,
+                        "all_dormant_accounts_identified.csv"
+                    )
+
+        # Raw Data Explorer
+        with st.expander("🔍 Raw Results Explorer (Technical Details)", expanded=False):
+            result_category = st.selectbox(
+                "Select Category to Explore:",
+                ["summary_kpis", "sdb_dormant", "investment_dormant", "fixed_deposit_dormant",
+                 "demand_deposit_dormant", "unclaimed_instruments", "eligible_for_cb_transfer",
+                 "art3_process_needed", "proactive_contact_needed", "high_value_dormant", "dormant_to_active"]
+            )
+
+            if result_category in results:
+                st.json(results[result_category], expanded=True)
+            else:
+                st.error(f"Category '{result_category}' not found in results.")
+
+        # Alerts and Recommendations
+        st.subheader("⚠️ Key Alerts & Immediate Actions Required")
+
+        alerts = []
+        if summary_kpis.get("count_high_value_dormant", 0) > 0:
+            alerts.append(
+                f"🚨 **HIGH PRIORITY**: {summary_kpis.get('count_high_value_dormant', 0)} high-value dormant accounts identified (≥AED 25,000)")
+
+        if summary_kpis.get("count_eligible_for_cb_transfer", 0) > 0:
+            alerts.append(
+                f"📋 **REGULATORY**: {summary_kpis.get('count_eligible_for_cb_transfer', 0)} accounts/instruments eligible for CBUAE transfer")
+
+        if summary_kpis.get("count_needing_art3_process", 0) > 0:
+            alerts.append(
+                f"📞 **ACTION REQUIRED**: {summary_kpis.get('count_needing_art3_process', 0)} accounts need Article 3 process (customer contact)")
+
+        if summary_kpis.get("count_needing_proactive_contact", 0) > 0:
+            alerts.append(
+                f"🔔 **PREVENTIVE**: {summary_kpis.get('count_needing_proactive_contact', 0)} accounts nearing dormancy - proactive contact recommended")
+
+        if alerts:
+            for alert in alerts:
+                st.markdown(alert)
+        else:
+            st.success("✅ No immediate alerts. All dormancy processes appear to be under control.")
+
+    else:
+        st.info(
+            "Click 'Run Complete Dormancy Analysis' to generate comprehensive dormancy insights across all categories.")
+        st.markdown("""
+        **This comprehensive analysis will provide:**
+        - 📊 Complete overview of all dormancy categories (Arts 2.1-2.6)
+        - 🎯 Key performance indicators and metrics
+        - 📈 Visual analytics with interactive pie charts
+        - ⚡ Process status and action items
+        - 🤖 AI-generated strategic insights
+        - 📥 Exportable reports (PDF/CSV)
+        - ⚠️ Priority alerts and recommendations
+        """)
 
 # --- Individual Agent View ---
 def render_individual_dormant_agent_view(df, selected_agent_key, report_date_str, llm, dormant_flags_history_df):

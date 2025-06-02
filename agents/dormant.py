@@ -66,8 +66,6 @@ def check_safe_deposit_dormancy(df, report_date):
             f"Safe Deposit Boxes meeting dormancy criteria (Art 2.6: >3yr unpaid, no tenant reply): {count} boxes"
         )
         details = {
-            "average_outstanding_charges": pd.to_numeric(data['SDB_Charges_Outstanding'], errors='coerce').mean() if count else 0,
-            "total_outstanding_charges": pd.to_numeric(data['SDB_Charges_Outstanding'], errors='coerce').sum() if count else 0,
             "earliest_charge_outstanding_date": str(data['Date_SDB_Charges_Became_Outstanding'].min().date()) if count and pd.notna(data['Date_SDB_Charges_Became_Outstanding'].min()) else "N/A",
             "sample_accounts": data['Account_ID'].head(3).tolist() if count else []
         }

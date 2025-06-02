@@ -10,7 +10,7 @@ from database.connection import get_db_connection
 
 # ⚠️ IMPORTANT: Set page config FIRST, before any other imports or operations ⚠️
 st.set_page_config(
-    page_title="Banking Compliance Analysis Tool",
+    page_title="Internal Audit Bot",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -79,7 +79,7 @@ def check_password():
         st.session_state["logout"] = False
 
     # Create a clean login form
-    st.markdown("<h1 style='text-align: center;'>Banking Compliance Analysis Tool</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>Internal Audit Bot</h1>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align: center;'>Login</h3>", unsafe_allow_html=True)
 
     # Use columns to center the login form
@@ -210,12 +210,13 @@ if check_password():
         # Display different UI based on selected mode
         if app_mode == "🏦 Dormant Account Analyzer":
             ui.dormant_ui.render_dormant_analyzer(df, report_date_str, llm, dormant_flags_history_df)   # NEW
-        elif app_mode == "🔒 Compliance Analyzer":
+        elif app_mode == "🔒 Dormant Compliance Analyzer":
             ui.compliance_ui.render_compliance_analyzer(df,agent_name_input, llm)
-        elif app_mode == "🔍 SQL Bot":
-            render_sqlbot(llm)
         elif app_mode == "💬 Chatbot Only":
             render_chatbot(df, llm)
+        elif app_mode == "🔍 SQL Bot":
+            render_sqlbot(llm)
+
     else:
         st.info(
             "👈 Please upload data using the sidebar options to get started."
