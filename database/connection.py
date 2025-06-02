@@ -276,3 +276,262 @@ def ping_connections():
                 except:
                     pass
                 CONNECTION_POOL[conn_key] = None
+"""
+Streamlit Cloud-compatible database connection using pymssql.
+"""
+import streamlit as st
+import pandas as pd
+import pymssql
+from sqlalchemy import create_engine
+from urllib.parse import quote_plus
+import os
+
+
+@st.cache_resource
+def get_streamlit_db_connection():
+    """
+    Get database connection optimized for Streamlit Cloud using pymssql.
+    """
+    try:
+        # Get credentials from secrets
+        server = st.secrets.get("DB_SERVER", os.getenv("DB_SERVER"))
+        database = st.secrets.get("DB_NAME", os.getenv("DB_NAME"))
+        username = st.secrets.get("DB_USERNAME", os.getenv("DB_USERNAME"))
+        password = st.secrets.get("DB_PASSWORD", os.getenv("DB_PASSWORD"))
+        port = int(st.secrets.get("DB_PORT", os.getenv("DB_PORT", "1433")))
+        
+        if not all([server, database, username, password]):
+            st.error("Database credentials missing. Check your secrets configuration.")
+            return None
+        
+        st.sidebar.info(f"Connecting to: {server} (using pymssql)")
+        
+        # Try pymssql direct connection first
+        try:
+            conn = pymssql.connect(
+                server=server,
+                user=username,
+                password=password,
+                database=database,
+                port=port,
+                timeout=30,
+                login_timeout=30,
+                as_dict=False
+            )
+            
+            # Test the connection
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+            
+            st.sidebar.success("✅ Connected via pymssql")
+            return conn
+            
+        except Exception as pymssql_error:
+            st.sidebar.warning(f"pymssql direct connection failed: {pymssql_error}")
+        
+        # Try SQLAlchemy with pymssql
+        try:
+            # Create connection string for SQLAlchemy
+            connection_string = f"mssql+pymssql://{username}:{quote_plus(password)}@{server}:{port}/{database}"
+            
+            engine = create_engine(
+                connection_string,
+                pool_pre_ping=True,
+                pool_recycle=300,
+                connect_args={
+                    "timeout": 30,
+                    "login_timeout": 30,
+                }
+            )
+            
+            # Test the connection
+            with engine.connect() as test_conn:
+                test_conn.execute("SELECT 1")
+            
+            st.sidebar.success("✅ Connected via SQLAlchemy + pymssql")
+            return engine
+            
+        except Exception as sqlalchemy_error:
+            st.sidebar.error(f"SQLAlchemy connection failed: {sqlalchemy_error}")
+        
+        return None
+        
+    except Exception as e:
+        st.sidebar.error(f"Connection setup failed: {e}")
+        return None
+
+
+def execute_query_streamlit(query, connection=None):
+    """
+    Execute SQL query with Streamlit Cloud optimizations.
+    """
+    if connection is None:
+        connection = get_streamlit_db_connection()
+        
+    if connection is None:
+        st.error("No database connection available")
+        return None
+    
+    try:
+        # Handle different connection types
+        if hasattr(connection, 'execute'):
+            # SQLAlchemy engine
+            return pd.read_sql(query, connection)
+        else:
+            # Direct pymssql connection
+            return pd.read_sql(query, connection)
+            
+    except Exception as e:
+        st.error(f"Query execution failed: {e}")
+        return None
+
+
+def test_streamlit_connection():
+    """
+    Test the Streamlit Cloud database connection.
+    """
+    st.subheader("🔌 Database Connection Test")
+    
+    with st.spinner("Testing connection..."):
+        conn = get_streamlit_db_connection()
+        
+        if conn:
+            try:
+                # Test with a simple query
+                result = execute_query_streamlit("SELECT 1 as test_value", conn)
+                
+                if result is not None and not result.empty:
+                    st.success("✅ Database connection successful!")
+                    
+                    # Try to get basic database info
+                    info_query = """
+                    SELECT 
+                        DB_NAME() as database_name,
+                        @@VERSION as sql_version,
+                        GETDATE() as current_time
+                    """
+                    
+                    info_result = execute_query_streamlit(info_query, conn)
+                    if info_result is not None:
+                        st.write("**Database Information:**")
+                        st.dataframe(info_result)
+                    
+                    # Try to list tables
+                    tables_query = """
+                    SELECT TOP 10 TABLE_NAME 
+                    FROM INFORMATION_SCHEMA.TABLES 
+                    WHERE TABLE_TYPE = 'BASE TABLE'
+                    ORDER BY TABLE_NAME
+                    """
+                    
+                    tables_result = execute_query_streamlit(tables_query, conn)
+                    if tables_result is not None and not tables_result.empty:
+                        st.write("**Available Tables:**")
+                        st.dataframe(tables_result)
+                    else:
+                        st.warning("No tables found or insufficient permissions")
+                        
+                else:
+                    st.error("Connection established but test query failed")
+                    
+            except Exception as e:
+                st.error(f"Connection test failed: {e}")
+        else:
+            st.error("❌ Failed to establish database connection")
+            
+            # Show troubleshooting guide
+            show_troubleshooting_guide()
+
+
+def show_troubleshooting_guide():
+    """
+    Show troubleshooting information for connection issues.
+    """
+    with st.expander("🔧 Troubleshooting Guide", expanded=True):
+        st.markdown("""
+        **Common Issues on Streamlit Cloud:**
+        
+        1. **ODBC Drivers Not Available**
+           - Streamlit Cloud doesn't have ODBC drivers installed
+           - Use `pymssql` instead of `pyodbc`
+           
+        2. **Firewall Issues**
+           - Add Streamlit Cloud IP to Azure SQL firewall
+           - Current detected IP needs to be whitelisted
+           
+        3. **Connection String Format**
+           - Use `pymssql` compatible format
+           - Ensure server name includes `.database.windows.net`
+           
+        4. **Credentials**
+           - Check secrets.toml format
+           - Verify username/password are correct
+           
+        **Recommended Actions:**
+        1. Update requirements.txt to use `pymssql`
+        2. Add current IP to Azure SQL firewall
+        3. Enable "Allow Azure services" in Azure SQL
+        4. Test connection locally first
+        """)
+        
+        # Show current IP
+        try:
+            import requests
+            ip_response = requests.get('https://httpbin.org/ip', timeout=5)
+            current_ip = ip_response.json()['origin']
+            
+            st.code(f"""
+# Add this IP to your Azure SQL firewall:
+az sql server firewall-rule create \\
+  --resource-group your-rg \\
+  --server agentdb123 \\
+  --name StreamlitCloud_{current_ip.replace('.', '_')} \\
+  --start-ip-address {current_ip} \\
+  --end-ip-address {current_ip}
+            """)
+        except:
+            st.info("Could not detect current IP address")
+
+
+def get_sample_data_if_no_connection():
+    """
+    Provide sample data when database connection fails.
+    """
+    st.warning("🔄 Database unavailable. Using sample data for demonstration.")
+    
+    # Create sample banking data
+    import random
+    from datetime import datetime, timedelta
+    
+    sample_data = []
+    account_types = ['Savings', 'Current', 'Fixed Deposit', 'Investment']
+    currencies = ['AED', 'USD', 'EUR']
+    
+    for i in range(50):
+        last_activity = datetime.now() - timedelta(days=random.randint(30, 1500))
+        
+        record = {
+            'Account_ID': f'ACC{i+1:06d}',
+            'Customer_ID': f'CUST{(i//3)+1:05d}',
+            'Account_Type': random.choice(account_types),
+            'Currency': random.choice(currencies),
+            'Current_Balance': round(random.uniform(100, 50000), 2),
+            'Date_Last_Cust_Initiated_Activity': last_activity.strftime('%Y-%m-%d'),
+            'Expected_Account_Dormant': 'Yes' if (datetime.now() - last_activity).days > 1095 else 'No',
+            'Customer_Address_Known': random.choice(['Yes', 'No']),
+            'Customer_Has_Active_Liability_Account': random.choice(['Yes', 'No']),
+        }
+        sample_data.append(record)
+    
+    return pd.DataFrame(sample_data)
+
+
+# Alternative connection function that replaces the original
+def get_db_connection():
+    """
+    Replacement for the original get_db_connection function.
+    This version works on Streamlit Cloud.
+    """
+    return get_streamlit_db_connection()
