@@ -1,149 +1,309 @@
+"""
+Data parsing utilities for the banking compliance application.
+"""
 import pandas as pd
-import numpy as np
-from datetime import datetime
-from io import StringIO
 import streamlit as st
-from config import SESSION_COLUMN_MAPPING
+from datetime import datetime
+import json
+from io import StringIO
 
 
-# Caching the parse function to improve performance on repeated calls
 @st.cache_data
 def parse_data(data_source):
     """
-    Parse uploaded data into a standardized format for the application.
-
+    Parse data from various sources (file, URL response, DataFrame).
+    
     Args:
-        data_source: File upload, DataFrame, or string data
-
+        data_source: Can be uploaded file, URL response text, or DataFrame
+        
     Returns:
-        DataFrame with standardized columns
+        pd.DataFrame: Parsed and standardized DataFrame
     """
-    # Convert the data source to a DataFrame
-    df = None
     try:
+        df = None
+        
+        # Handle different data source types
         if isinstance(data_source, pd.DataFrame):
-            # Already a DataFrame, make a copy
             df = data_source.copy()
-        elif hasattr(data_source, 'read'):
-            # File upload
-            file_extension = data_source.name.split('.')[-1].lower()
-
-            if file_extension == 'csv':
+        elif hasattr(data_source, 'name'):  # Uploaded file
+            if data_source.name.endswith('.csv'):
                 df = pd.read_csv(data_source)
-            elif file_extension in ['xls', 'xlsx']:
+            elif data_source.name.endswith(('.xlsx', '.xls')):
                 df = pd.read_excel(data_source)
-            elif file_extension == 'json':
+            elif data_source.name.endswith('.json'):
                 df = pd.read_json(data_source)
+        elif isinstance(data_source, str):  # URL response or JSON string
+            if data_source.strip().startswith('{') or data_source.strip().startswith('['):
+                # JSON string
+                df = pd.read_json(StringIO(data_source))
             else:
-                raise ValueError(f"Unsupported file format: {file_extension}")
-        elif isinstance(data_source, str):
-            # String data (probably from URL)
-            df = pd.read_csv(StringIO(data_source))
-        else:
-            raise ValueError(f"Unsupported data source type: {type(data_source)}")
+                # CSV string
+                df = pd.read_csv(StringIO(data_source))
+        
+        if df is None or df.empty:
+            st.error("Could not parse data or data is empty")
+            return pd.DataFrame()
+        
+        # Standardize column names and data
+        df_standardized = standardize_dataframe(df)
+        
+        st.success(f"✅ Successfully parsed {len(df_standardized)} rows with {len(df_standardized.columns)} columns")
+        return df_standardized
+        
     except Exception as e:
-        st.error(f"Error parsing data: {str(e)}")
-        raise e
+        st.error(f"Error parsing data: {e}")
+        return pd.DataFrame()
 
-    # Ensure essential columns exist
-    required_columns = [
-        "Account_ID", "Customer_ID", "Account_Type",
-        "Date_Last_Cust_Initiated_Activity", "Expected_Account_Dormant"
-    ]
 
-    # Check if required columns exist (case-insensitive)
-    df_columns_lower = [col.lower() for col in df.columns]
-    column_mapping = {}
+def standardize_dataframe(df):
+    """
+    Standardize DataFrame column names and data types for banking compliance.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame
+        
+    Returns:
+        pd.DataFrame: Standardized DataFrame
+    """
+    if df.empty:
+        return df
+    
+    # Create a copy to avoid modifying original
+    standardized_df = df.copy()
+    
+    # Column mapping from various possible names to standard names
+    column_mapping = {
+        # Account Information
+        'account_id': 'Account_ID',
+        'accountid': 'Account_ID',
+        'account_number': 'Account_ID',
+        'acc_id': 'Account_ID',
+        
+        'customer_id': 'Customer_ID',
+        'customerid': 'Customer_ID',
+        'cust_id': 'Customer_ID',
+        'client_id': 'Customer_ID',
+        
+        'account_type': 'Account_Type',
+        'accounttype': 'Account_Type',
+        'acc_type': 'Account_Type',
+        'type': 'Account_Type',
+        
+        'currency': 'Currency',
+        'curr': 'Currency',
+        'ccy': 'Currency',
+        
+        # Balance Information
+        'balance': 'Current_Balance',
+        'current_balance': 'Current_Balance',
+        'currentbalance': 'Current_Balance',
+        'amount': 'Current_Balance',
+        'balance_amount': 'Current_Balance',
+        
+        # Date Fields
+        'last_activity': 'Date_Last_Cust_Initiated_Activity',
+        'last_activity_date': 'Date_Last_Cust_Initiated_Activity',
+        'date_last_activity': 'Date_Last_Cust_Initiated_Activity',
+        'lastactivity': 'Date_Last_Cust_Initiated_Activity',
+        
+        'creation_date': 'Account_Creation_Date',
+        'account_creation_date': 'Account_Creation_Date',
+        'created_date': 'Account_Creation_Date',
+        'date_created': 'Account_Creation_Date',
+        
+        # Communication Dates
+        'last_communication': 'Date_Last_Customer_Communication_Any_Type',
+        'last_comm_date': 'Date_Last_Customer_Communication_Any_Type',
+        'communication_date': 'Date_Last_Customer_Communication_Any_Type',
+        
+        # Status Fields
+        'dormant': 'Expected_Account_Dormant',
+        'is_dormant': 'Expected_Account_Dormant',
+        'dormant_flag': 'Expected_Account_Dormant',
+        'expected_dormant': 'Expected_Account_Dormant',
+        
+        'address_known': 'Customer_Address_Known',
+        'address_available': 'Customer_Address_Known',
+        'has_address': 'Customer_Address_Known',
+        
+        'has_liability': 'Customer_Has_Active_Liability_Account',
+        'liability_account': 'Customer_Has_Active_Liability_Account',
+        'active_liability': 'Customer_Has_Active_Liability_Account',
+    }
+    
+    # Apply column mapping
+    current_columns = [col.lower().replace(' ', '_').replace('-', '_') for col in standardized_df.columns]
+    new_column_names = {}
+    
+    for i, col in enumerate(standardized_df.columns):
+        normalized_col = current_columns[i]
+        if normalized_col in column_mapping:
+            new_column_names[col] = column_mapping[normalized_col]
+    
+    # Rename columns
+    standardized_df = standardized_df.rename(columns=new_column_names)
+    
+    # Store mapping in session state for reference
+    if 'SESSION_COLUMN_MAPPING' not in st.session_state:
+        st.session_state['SESSION_COLUMN_MAPPING'] = {}
+    
+    # Reverse mapping for display purposes
+    reverse_mapping = {v: k for k, v in new_column_names.items()}
+    st.session_state['SESSION_COLUMN_MAPPING'].update(reverse_mapping)
+    
+    # Standardize data types
+    standardized_df = standardize_data_types(standardized_df)
+    
+    # Add missing required columns with default values
+    required_columns = {
+        'Expected_Account_Dormant': 'No',
+        'Expected_Requires_Article_3_Process': 'No',
+        'Expected_Transfer_to_CB_Due': 'No',
+        'Customer_Address_Known': 'Unknown',
+        'Customer_Has_Active_Liability_Account': 'Unknown',
+    }
+    
+    for col, default_value in required_columns.items():
+        if col not in standardized_df.columns:
+            standardized_df[col] = default_value
+    
+    return standardized_df
 
-    # Map columns by case-insensitive matching
-    for req_col in required_columns:
-        req_col_lower = req_col.lower()
-        found = False
 
-        for i, col in enumerate(df_columns_lower):
-            if col == req_col_lower:
-                # Found a match, use the original case from the uploaded data
-                orig_col = df.columns[i]
-                if orig_col != req_col:
-                    # Rename only if different
-                    column_mapping[orig_col] = req_col
-                found = True
-                break
-
-        if not found:
-            # Add missing required column with default values
-            st.warning(f"Required column '{req_col}' not found. Adding with default values.")
-            if req_col == "Account_ID":
-                df[req_col] = [f"ACC{i + 1000}" for i in range(len(df))]
-            elif req_col == "Customer_ID":
-                df[req_col] = [f"CUST{i + 1000}" for i in range(len(df))]
-            elif req_col == "Account_Type":
-                df[req_col] = "Unknown"
-            elif req_col == "Date_Last_Cust_Initiated_Activity":
-                df[req_col] = datetime.now().strftime("%Y-%m-%d")
-            elif req_col == "Expected_Account_Dormant":
-                df[req_col] = "No"
-
-    # Rename columns based on mapping
-    if column_mapping:
-        df = df.rename(columns=column_mapping)
-
-    # Ensure date columns are properly formatted
+def standardize_data_types(df):
+    """
+    Standardize data types for banking compliance fields.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame
+        
+    Returns:
+        pd.DataFrame: DataFrame with standardized data types
+    """
+    if df.empty:
+        return df
+    
+    # Date columns to convert
     date_columns = [
-        "Date_Last_Cust_Initiated_Activity",
-        "Account_Open_Date",
-        "Last_Communication_Date"
+        'Account_Creation_Date',
+        'Date_Last_Cust_Initiated_Activity',
+        'Date_Last_Customer_Communication_Any_Type',
+        'Date_Last_Bank_Contact_Attempt',
+        'FTD_Maturity_Date',
+        'Inv_Maturity_Redemption_Date',
+        'Date_SDB_Charges_Became_Outstanding',
+        'Unclaimed_Item_Trigger_Date',
+        'Date_Claim_Received',
     ]
-
-    for date_col in date_columns:
-        if date_col in df.columns:
+    
+    # Convert date columns
+    for col in date_columns:
+        if col in df.columns:
             try:
-                df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-                df[date_col] = df[date_col].dt.strftime('%Y-%m-%d')
+                df[col] = pd.to_datetime(df[col], errors='coerce')
             except Exception as e:
-                st.warning(f"Could not convert {date_col} to date format. Error: {e}")
-
-    # Standardize yes/no fields
-    original_boolean_column_list = [
-        "Expected_Account_Dormant",
-        "Has_Address",
-        "Has_Active_Accounts"
+                st.warning(f"Could not convert {col} to datetime: {e}")
+    
+    # Numeric columns to convert
+    numeric_columns = [
+        'Current_Balance',
+        'SDB_Charges_Outstanding',
+        'Unclaimed_Item_Amount',
+        'Amount_Paid_on_Claim',
     ]
-    # In your data processing/standardization logic
-    if 'SDB_Charges_Outstanding' in df.columns:
-        def convert_sdb_charges(val):
-            s_val = str(val).lower()
-            if s_val in ["yes", "y", "true", "1", "t"]:
-                return 1.0  # Placeholder for "charges are outstanding"
-            elif s_val in ["no", "n", "false", "0", "f", "nan", ""]:
-                return 0.0
+    
+    # Convert numeric columns
+    for col in numeric_columns:
+        if col in df.columns:
             try:
-                return float(val)  # If it's already a number or numeric string
-            except ValueError:
-                return 0.0  # Default for unparseable, or could be np.nan then fillna
-
-        df['SDB_Charges_Outstanding'] = df['SDB_Charges_Outstanding'].apply(convert_sdb_charges)
-        # Ensure it's float type after conversion
-        df['SDB_Charges_Outstanding'] = pd.to_numeric(df['SDB_Charges_Outstanding'], errors='coerce').fillna(0.0)
-
-    # Then apply your general boolean standardization to other columns
-    # (excluding SDB_Charges_Outstanding if it's now numeric)
-    boolean_columns = [col for col in original_boolean_column_list if col != 'SDB_Charges_Outstanding']
-
-    for bool_col in boolean_columns:
-        if bool_col in df.columns:
-            # Convert to string first
-            df[bool_col] = df[bool_col].astype(str).str.lower()
-            # Standardize to Yes/No
-            df[bool_col] = df[bool_col].apply(
-                lambda x: "Yes" if x.lower() in ["yes", "y", "true", "1", "t"] else
-                ("No" if x.lower() in ["no", "n", "false", "0", "f"] else x)
-            )
-
-    # Store original column names for display purposes
-    st.session_state[SESSION_COLUMN_MAPPING] = {col: col for col in df.columns}
-
-    # Log the parsing results
-    st.sidebar.info(f"Processed {len(df)} rows with {len(df.columns)} columns")
-
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            except Exception as e:
+                st.warning(f"Could not convert {col} to numeric: {e}")
+    
+    # Boolean-like columns to standardize
+    boolean_columns = [
+        'Expected_Account_Dormant',
+        'Expected_Requires_Article_3_Process', 
+        'Expected_Transfer_to_CB_Due',
+        'FTD_Auto_Renewal',
+        'SDB_Tenant_Communication_Received',
+        'Bank_Contact_Attempted_Post_Dormancy_Trigger',
+        'Customer_Responded_to_Bank_Contact',
+        'Claim_Successful',
+        'Customer_Address_Known',
+        'Customer_Has_Active_Liability_Account',
+        'Customer_Has_Litigation_Regulatory_Reqs',
+        'Holder_Has_Activity_On_Any_Other_Account',
+        'Is_Asset_Only_Customer_Type',
+    ]
+    
+    # Standardize boolean-like columns
+    for col in boolean_columns:
+        if col in df.columns:
+            try:
+                df[col] = df[col].astype(str).str.lower()
+                df[col] = df[col].replace({
+                    'true': 'Yes', '1': 'Yes', 'yes': 'Yes', 'y': 'Yes',
+                    'false': 'No', '0': 'No', 'no': 'No', 'n': 'No',
+                    'nan': 'Unknown', 'none': 'Unknown', '': 'Unknown'
+                })
+                # Set default for any remaining NaN values
+                df[col] = df[col].fillna('Unknown')
+            except Exception as e:
+                st.warning(f"Could not standardize {col}: {e}")
+    
     return df
+
+
+def validate_required_fields(df):
+    """
+    Validate that required fields are present for compliance analysis.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame
+        
+    Returns:
+        tuple: (is_valid, missing_fields)
+    """
+    required_fields = [
+        'Account_ID',
+        'Customer_ID', 
+        'Account_Type',
+    ]
+    
+    missing_fields = [field for field in required_fields if field not in df.columns]
+    
+    return len(missing_fields) == 0, missing_fields
+
+
+def create_sample_data():
+    """
+    Create sample banking data for testing.
+    
+    Returns:
+        pd.DataFrame: Sample DataFrame
+    """
+    import random
+    from datetime import timedelta
+    
+    sample_data = []
+    account_types = ['Savings', 'Current', 'Fixed Deposit', 'Investment']
+    currencies = ['AED', 'USD', 'EUR']
+    
+    for i in range(50):
+        last_activity = datetime.now() - timedelta(days=random.randint(30, 2000))
+        
+        record = {
+            'Account_ID': f'ACC{i+1:06d}',
+            'Customer_ID': f'CUST{(i//3)+1:05d}',
+            'Account_Type': random.choice(account_types),
+            'Currency': random.choice(currencies),
+            'Current_Balance': round(random.uniform(100, 100000), 2),
+            'Date_Last_Cust_Initiated_Activity': last_activity,
+            'Expected_Account_Dormant': 'Yes' if (datetime.now() - last_activity).days > 1095 else 'No',
+            'Customer_Address_Known': random.choice(['Yes', 'No', 'Unknown']),
+            'Customer_Has_Active_Liability_Account': random.choice(['Yes', 'No']),
+        }
+        sample_data.append(record)
+    
+    return pd.DataFrame(sample_data)
