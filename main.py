@@ -125,7 +125,18 @@ if check_password():
 
     # Import database initialization functions
     from database.schema import init_db, get_db_schema
+# Add this after imports but before UI rendering
+# Initialize session state variables
+    from config import SESSION_COLUMN_MAPPING, SESSION_APP_DF, SESSION_DATA_PROCESSED
 
+    if SESSION_COLUMN_MAPPING not in st.session_state:
+    st.session_state[SESSION_COLUMN_MAPPING] = {}
+    
+    if SESSION_APP_DF not in st.session_state:
+    st.session_state[SESSION_APP_DF] = None
+    
+    if SESSION_DATA_PROCESSED not in st.session_state:
+    st.session_state[SESSION_DATA_PROCESSED] = False
     # Now import UI modules
     from ui.sidebar import render_sidebar
     from ui.dormant_ui import render_dormant_analyzer
