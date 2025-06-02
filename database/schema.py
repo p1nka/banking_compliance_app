@@ -1,344 +1,438 @@
-import pyodbc
 import streamlit as st
 import time
+import pandas as pd
+from datetime import datetime
 
-import database
 from database.connection import get_db_connection
 from config import DB_NAME, DB_SERVER
 
 
 def init_db():
-    """ Initializes the Azure SQL database and tables using the default connection."""
-    conn = get_db_connection()
-    if conn is None:
-        st.error("Cannot initialize database: Default DB connection failed.")
-        return False  # Do not stop execution, allow app to run in disconnected mode
-
+    """
+    Initialize the Azure SQL database and tables.
+    Enhanced with better error handling and connection management.
+    """
     try:
-        with conn:
-            cursor = conn.cursor()
+        conn = get_db_connection()
+        if conn is None:
+            st.sidebar.warning("⚠️ Database connection failed. App will run in offline mode.")
+            return False
 
-            # Check if tables exist before creating them
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'accounts_data')
-                CREATE TABLE accounts_data (
-                    Account_ID NVARCHAR(255) NOT NULL,
-                    Customer_ID NVARCHAR(255) NOT NULL,
-                    Account_Type NVARCHAR(255) NOT NULL,
-                    Currency NVARCHAR(50),
-                    Account_Creation_Date DATE,
-                    Current_Balance DECIMAL(18, 2),
-                    Date_Last_Bank_Initiated_Activity DATE,
-                    Date_Last_Customer_Communication_Any_Type DATE,
-                    FTD_Maturity_Date DATE,
-                    FTD_Auto_Renewal NVARCHAR(10),
-                    Date_Last_FTD_Renewal_Claim_Request DATE,
-                    Inv_Maturity_Redemption_Date DATE,
-                    SDB_Charges_Outstanding DECIMAL(18, 2),
-                    Date_SDB_Charges_Became_Outstanding DATE,
-                    SDB_Tenant_Communication_Received NVARCHAR(10),
-                    Unclaimed_Item_Trigger_Date DATE,
-                    Unclaimed_Item_Amount DECIMAL(18, 2),
-                    Date_Last_Cust_Initiated_Activity DATE,
-                    Bank_Contact_Attempted_Post_Dormancy_Trigger NVARCHAR(10),
-                    Date_Last_Bank_Contact_Attempt DATE,
-                    Customer_Responded_to_Bank_Contact NVARCHAR(10),
-                    Date_Claim_Received DATE,
-                    Claim_Successful NVARCHAR(10),
-                    Amount_Paid_on_Claim DECIMAL(18, 2),
-                    Scenario_Notes NVARCHAR(MAX),
-                    Customer_Address_Known NVARCHAR(10),
-                    Customer_Has_Active_Liability_Account NVARCHAR(10),
-                    Customer_Has_Litigation_Regulatory_Reqs NVARCHAR(10),
-                    Holder_Has_Activity_On_Any_Other_Account NVARCHAR(10),
-                    Is_Asset_Only_Customer_Type NVARCHAR(10),
-                    Expected_Account_Dormant NVARCHAR(10),
-                    Expected_Requires_Article_3_Process NVARCHAR(10),
-                    Expected_Transfer_to_CB_Due NVARCHAR(10)
-                )
-            """)
+        # Test if connection is working
+        try:
+            # Test the connection first
+            if hasattr(conn, 'execute'):
+                # SQLAlchemy engine
+                with conn.connect() as test_conn:
+                    test_conn.execute("SELECT 1")
+            else:
+                # Direct connection
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+                cursor.close()
+        except Exception as test_error:
+            st.sidebar.warning(f"⚠️ Database connection test failed: {test_error}")
+            return False
 
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'dormant_flags')
+        # Initialize tables
+        success = create_tables_if_not_exist(conn)
+        
+        if success:
+            st.sidebar.success("✅ Database schema verified/initialized")
+        else:
+            st.sidebar.warning("⚠️ Database schema initialization had issues")
+            
+        return success
+
+    except Exception as e:
+        st.sidebar.error(f"❌ Database initialization error: {str(e)}")
+        st.sidebar.info("App will continue in offline mode")
+        return False
+
+
+def create_tables_if_not_exist(conn):
+    """
+    Create necessary tables if they don't exist.
+    Works with both SQLAlchemy engines and direct connections.
+    """
+    try:
+        if hasattr(conn, 'execute'):
+            # SQLAlchemy engine - use connection context
+            return create_tables_sqlalchemy(conn)
+        else:
+            # Direct connection (pymssql)
+            return create_tables_direct(conn)
+    except Exception as e:
+        st.sidebar.error(f"Table creation error: {e}")
+        return False
+
+
+def create_tables_sqlalchemy(engine):
+    """Create tables using SQLAlchemy engine."""
+    try:
+        with engine.connect() as conn:
+            # Check if main table exists
+            check_query = """
+            SELECT COUNT(*) as table_count 
+            FROM INFORMATION_SCHEMA.TABLES 
+            WHERE TABLE_NAME = 'accounts_data'
+            """
+            
+            result = conn.execute(check_query)
+            table_exists = result.fetchone()[0] > 0
+            
+            if not table_exists:
+                st.sidebar.info("Creating accounts_data table...")
+                create_accounts_table_sqlalchemy(conn)
+            
+            # Create other essential tables
+            create_support_tables_sqlalchemy(conn)
+            
+            conn.commit()
+            return True
+            
+    except Exception as e:
+        st.sidebar.error(f"SQLAlchemy table creation failed: {e}")
+        return False
+
+
+def create_tables_direct(conn):
+    """Create tables using direct connection."""
+    try:
+        cursor = conn.cursor()
+        
+        # Check if main table exists
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM INFORMATION_SCHEMA.TABLES 
+            WHERE TABLE_NAME = 'accounts_data'
+        """)
+        
+        table_exists = cursor.fetchone()[0] > 0
+        
+        if not table_exists:
+            st.sidebar.info("Creating accounts_data table...")
+            create_accounts_table_direct(cursor)
+        
+        # Create other essential tables
+        create_support_tables_direct(cursor)
+        
+        conn.commit()
+        cursor.close()
+        return True
+        
+    except Exception as e:
+        st.sidebar.error(f"Direct table creation failed: {e}")
+        return False
+
+
+def create_accounts_table_sqlalchemy(conn):
+    """Create accounts_data table using SQLAlchemy."""
+    create_sql = """
+    CREATE TABLE accounts_data (
+        Account_ID NVARCHAR(255) NOT NULL PRIMARY KEY,
+        Customer_ID NVARCHAR(255) NOT NULL,
+        Account_Type NVARCHAR(255) NOT NULL,
+        Currency NVARCHAR(50),
+        Account_Creation_Date DATE,
+        Current_Balance DECIMAL(18, 2),
+        Date_Last_Cust_Initiated_Activity DATE,
+        Date_Last_Customer_Communication_Any_Type DATE,
+        Expected_Account_Dormant NVARCHAR(10) DEFAULT 'No',
+        Customer_Address_Known NVARCHAR(10) DEFAULT 'Unknown',
+        Customer_Has_Active_Liability_Account NVARCHAR(10) DEFAULT 'Unknown'
+    )
+    """
+    conn.execute(create_sql)
+
+
+def create_accounts_table_direct(cursor):
+    """Create accounts_data table using direct cursor."""
+    create_sql = """
+    CREATE TABLE accounts_data (
+        Account_ID NVARCHAR(255) NOT NULL PRIMARY KEY,
+        Customer_ID NVARCHAR(255) NOT NULL,
+        Account_Type NVARCHAR(255) NOT NULL,
+        Currency NVARCHAR(50),
+        Account_Creation_Date DATE,
+        Current_Balance DECIMAL(18, 2),
+        Date_Last_Cust_Initiated_Activity DATE,
+        Date_Last_Customer_Communication_Any_Type DATE,
+        Expected_Account_Dormant NVARCHAR(10) DEFAULT 'No',
+        Customer_Address_Known NVARCHAR(10) DEFAULT 'Unknown',
+        Customer_Has_Active_Liability_Account NVARCHAR(10) DEFAULT 'Unknown'
+    )
+    """
+    cursor.execute(create_sql)
+
+
+def create_support_tables_sqlalchemy(conn):
+    """Create support tables using SQLAlchemy."""
+    tables_sql = [
+        """
+        CREATE TABLE IF NOT EXISTS dormant_flags (
+            id INT IDENTITY(1,1) PRIMARY KEY,
+            account_id NVARCHAR(255) NOT NULL,
+            flag_instruction NVARCHAR(MAX) NOT NULL,
+            timestamp DATETIME2 DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS sql_query_history (
+            id INT IDENTITY(1,1) PRIMARY KEY,
+            natural_language_query NVARCHAR(MAX) NOT NULL,
+            sql_query NVARCHAR(MAX) NOT NULL,
+            timestamp DATETIME2 DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    ]
+    
+    for sql in tables_sql:
+        try:
+            conn.execute(sql.replace("CREATE TABLE IF NOT EXISTS", 
+                        "IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{}') CREATE TABLE".format(
+                            sql.split()[5])))  # Extract table name
+        except:
+            # Ignore if table already exists
+            pass
+
+
+def create_support_tables_direct(cursor):
+    """Create support tables using direct cursor."""
+    # Check and create dormant_flags table
+    try:
+        cursor.execute("""
+            IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'dormant_flags')
+            BEGIN
                 CREATE TABLE dormant_flags (
                     id INT IDENTITY(1,1) PRIMARY KEY,
                     account_id NVARCHAR(255) NOT NULL,
                     flag_instruction NVARCHAR(MAX) NOT NULL,
-                    flag_reason NVARCHAR(255),
-                    flag_days INT,
-                    flagged_by NVARCHAR(100) DEFAULT 'system',
                     timestamp DATETIME2 DEFAULT CURRENT_TIMESTAMP
                 )
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'dormant_ledger')
-                CREATE TABLE dormant_ledger (
-                    id INT IDENTITY(1,1) PRIMARY KEY,
-                    account_id NVARCHAR(255) NOT NULL,
-                    classification NVARCHAR(255) NOT NULL,
-                    classification_reason NVARCHAR(MAX),
-                    classified_by NVARCHAR(100) DEFAULT 'system',
-                    timestamp DATETIME2 DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'insight_log')
-                CREATE TABLE insight_log (
-                    id INT IDENTITY(1,1) PRIMARY KEY,
-                    timestamp DATETIME2 DEFAULT CURRENT_TIMESTAMP,
-                    observation NVARCHAR(MAX) NOT NULL,
-                    trend NVARCHAR(MAX) NOT NULL,
-                    insight NVARCHAR(MAX) NOT NULL,
-                    action NVARCHAR(MAX) NOT NULL,
-                    created_by NVARCHAR(100) DEFAULT 'system'
-                )
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'sql_query_history')
+            END
+        """)
+    except:
+        pass
+    
+    # Check and create sql_query_history table
+    try:
+        cursor.execute("""
+            IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'sql_query_history')
+            BEGIN
                 CREATE TABLE sql_query_history (
                     id INT IDENTITY(1,1) PRIMARY KEY,
                     natural_language_query NVARCHAR(MAX) NOT NULL,
                     sql_query NVARCHAR(MAX) NOT NULL,
-                    execution_status NVARCHAR(50) DEFAULT 'completed',
-                    rows_returned INT DEFAULT 0,
-                    execution_time_ms INT,
                     timestamp DATETIME2 DEFAULT CURRENT_TIMESTAMP
                 )
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'analysis_results')
-                CREATE TABLE analysis_results (
-                    id INT IDENTITY(1,1) PRIMARY KEY,
-                    analysis_type NVARCHAR(100) NOT NULL,
-                    analysis_name NVARCHAR(255) NOT NULL,
-                    result_data NVARCHAR(MAX) NOT NULL,
-                    result_summary NVARCHAR(MAX),
-                    record_count INT,
-                    created_by NVARCHAR(100) DEFAULT 'system',
-                    timestamp DATETIME2 DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            # Create indexes
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_accounts_data_Account_ID' AND object_id = OBJECT_ID('accounts_data'))
-                BEGIN
-                    CREATE INDEX IX_accounts_data_Account_ID ON accounts_data (Account_ID);
-                END
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_accounts_data_Customer_ID' AND object_id = OBJECT_ID('accounts_data'))
-                BEGIN
-                    CREATE INDEX IX_accounts_data_Customer_ID ON accounts_data (Customer_ID);
-                END
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_accounts_data_Account_Type' AND object_id = OBJECT_ID('accounts_data'))
-                BEGIN
-                    CREATE INDEX IX_accounts_data_Account_Type ON accounts_data (Account_Type);
-                END
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_accounts_data_Date_Last_Cust_Initiated_Activity' 
-                               AND object_id = OBJECT_ID('accounts_data'))
-                BEGIN
-                    CREATE INDEX IX_accounts_data_Date_Last_Cust_Initiated_Activity 
-                    ON accounts_data (Date_Last_Cust_Initiated_Activity);
-                END
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_accounts_data_Expected_Account_Dormant' 
-                               AND object_id = OBJECT_ID('accounts_data'))
-                BEGIN
-                    CREATE INDEX IX_accounts_data_Expected_Account_Dormant
-                    ON accounts_data (Expected_Account_Dormant);
-                END
-            """)
-
-            conn.commit()
-            st.sidebar.success("✅ Database schema initialized/verified.")
-        return True
-    except pyodbc.Error as e:
-        st.error(f"Database Initialization Error: {e}")
-        return False
-    except Exception as e:
-        st.error(f"An unexpected error occurred during DB initialization: {e}")
-        return False
+            END
+        """)
+    except:
+        pass
 
 
-@st.cache_data(show_spinner="Fetching database schema for SQL Bot...", ttl="1h")  # Cache schema for 1 hour
+@st.cache_data(ttl="1h")
 def get_db_schema():
-    """Fetches schema for the default database."""
-    conn = database.connection.get_db_connection()  # Always use the default cached connection helper
-
-    if conn is None:
-        # Error message is already shown by get_db_connection
-        return None
-
-    schema_info = {}
-    db_identifier = f"default database '{DB_NAME}' on '{DB_SERVER}'"
-
+    """
+    Get database schema with enhanced error handling.
+    """
     try:
-        with conn:  # Use context manager with the cached connection
-            cursor = conn.cursor()
-            # Fetch tables from the default database
-            cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
-            tables = cursor.fetchall()
-            for table_row in tables:
-                table_name = table_row[0]
-                # Fetch columns for each table
-                cursor.execute(
-                    f"SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?",
-                    (table_name,))
-                columns_raw = cursor.fetchall()
-                column_details = []
-                for col_raw in columns_raw:
-                    col_name, data_type, max_length, is_nullable = col_raw[0], col_raw[1], col_raw[2], col_raw[3]
-                    type_info = f"{data_type}"
-                    if data_type in ('varchar', 'nvarchar', 'char', 'nchar', 'binary', 'varbinary'):
-                        if max_length == -1:
-                            type_info += "(MAX)"
-                        elif max_length is not None:
-                            type_info += f"({max_length})"
-                    elif data_type in ('decimal', 'numeric'):
-                        # Fetch precision and scale
-                        try:
-                            cursor.execute(
-                                f"SELECT NUMERIC_PRECISION, NUMERIC_SCALE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ? AND COLUMN_NAME = ?",
-                                (table_name, col_name))
-                            prec_scale = cursor.fetchone()
-                            if prec_scale:
-                                precision, scale = prec_scale
-                                type_info += f"({precision},{scale})"
-                        except Exception:
-                            pass  # Ignore if fetching precision/scale fails
-                    elif data_type in ('float', 'real'):
-                        # Fetch precision for float/real
-                        try:
-                            cursor.execute(
-                                f"SELECT NUMERIC_PRECISION FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ? AND COLUMN_NAME = ?",
-                                (table_name, col_name))
-                            precision = cursor.fetchone()
-                            if precision and precision[0] is not None:
-                                type_info += f"({precision[0]})"
-                        except Exception:
-                            pass  # Ignore
+        conn = get_db_connection()
+        if conn is None:
+            st.sidebar.warning("Cannot fetch schema: No database connection")
+            return None
 
-                    nullable_status = "NULL" if is_nullable == "YES" else "NOT NULL"
-
-                    column_details.append(
-                        (col_name, f"{type_info} {nullable_status}"))  # Add nullable status to schema info
-
-                schema_info[table_name] = column_details
-
-        # Sleep briefly to stabilize connection
-        time.sleep(0.5)
-
-        st.sidebar.success("✅ Database schema fetched.")
+        schema_info = {}
+        
+        if hasattr(conn, 'execute'):
+            # SQLAlchemy engine
+            schema_info = get_schema_sqlalchemy(conn)
+        else:
+            # Direct connection
+            schema_info = get_schema_direct(conn)
+        
+        if schema_info:
+            st.sidebar.info(f"✅ Schema loaded: {len(schema_info)} tables")
+        else:
+            st.sidebar.warning("⚠️ No tables found in schema")
+            
         return schema_info
 
-    except pyodbc.Error as e:
-        st.error(f"SQL Bot: Database error fetching schema from {db_identifier}: {e}")
-        return None
     except Exception as e:
-        st.error(f"SQL Bot: Unexpected error fetching schema from {db_identifier}: {e}")
+        st.sidebar.error(f"Schema fetch error: {e}")
         return None
-    # database/schema.py
-    """
-    Database schema utilities for the application.
-    """
 
-    from database.connection import get_db_connection
 
-    def get_db_schema():
-        """
-        Get the database schema information.
-
-        Returns:
-            dict: A dictionary of tables and their columns, or None if error
-        """
-        try:
-            conn = get_db_connection()
-            if not conn:
-                return None
-
-            cursor = conn.cursor()
-
-            # Get all tables from the database
-            tables_query = """
-                           SELECT TABLE_NAME
-                           FROM INFORMATION_SCHEMA.TABLES
-                           WHERE TABLE_TYPE = 'BASE TABLE'
-                             AND TABLE_CATALOG = DB_NAME()
-                           ORDER BY TABLE_NAME \
-                           """
-
-            cursor.execute(tables_query)
-            tables = cursor.fetchall()
-
-            schema = {}
-
-            # For each table, get its columns
-            for table in tables:
-                table_name = table[0]
-
-                columns_query = f"""
-                SELECT COLUMN_NAME, DATA_TYPE
-                FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_NAME = '{table_name}'
+def get_schema_sqlalchemy(engine):
+    """Get schema using SQLAlchemy engine."""
+    schema_info = {}
+    
+    try:
+        with engine.connect() as conn:
+            # Get tables
+            tables_query = "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'"
+            tables_result = conn.execute(tables_query)
+            tables = [row[0] for row in tables_result]
+            
+            for table_name in tables:
+                # Get columns for each table
+                columns_query = """
+                SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = ?
                 ORDER BY ORDINAL_POSITION
                 """
+                columns_result = conn.execute(columns_query, (table_name,))
+                
+                columns = []
+                for col_row in columns_result:
+                    col_name, data_type, is_nullable = col_row
+                    nullable_status = "NULL" if is_nullable == "YES" else "NOT NULL"
+                    columns.append((col_name, f"{data_type} {nullable_status}"))
+                
+                schema_info[table_name] = columns
+                
+    except Exception as e:
+        st.sidebar.error(f"SQLAlchemy schema error: {e}")
+        
+    return schema_info
 
-                cursor.execute(columns_query)
-                columns = cursor.fetchall()
 
-                schema[table_name] = [(col[0], col[1]) for col in columns]
+def get_schema_direct(conn):
+    """Get schema using direct connection."""
+    schema_info = {}
+    
+    try:
+        cursor = conn.cursor()
+        
+        # Get tables
+        cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
+        tables = [row[0] for row in cursor.fetchall()]
+        
+        for table_name in tables:
+            # Get columns for each table
+            cursor.execute("""
+                SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = ?
+                ORDER BY ORDINAL_POSITION
+            """, (table_name,))
+            
+            columns = []
+            for col_row in cursor.fetchall():
+                col_name, data_type, is_nullable = col_row
+                nullable_status = "NULL" if is_nullable == "YES" else "NOT NULL"
+                columns.append((col_name, f"{data_type} {nullable_status}"))
+            
+            schema_info[table_name] = columns
+        
+        cursor.close()
+        
+    except Exception as e:
+        st.sidebar.error(f"Direct schema error: {e}")
+        
+    return schema_info
 
-            cursor.close()
 
-            return schema
-        except Exception as e:
-            print(f"Error retrieving database schema: {e}")
-            return None
-
-    def get_table_schema(table_name):
-        """
-        Get schema information for a specific table.
-
-        Args:
-            table_name (str): Name of the table
-
-        Returns:
-            list: A list of (column_name, data_type) tuples, or None if error
-        """
-        try:
-            conn = get_db_connection()
-            if not conn:
-                return None
-
+def test_database_operations():
+    """Test basic database operations."""
+    st.subheader("🧪 Database Operations Test")
+    
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            st.error("No database connection available")
+            return
+        
+        # Test basic query
+        if hasattr(conn, 'execute'):
+            # SQLAlchemy
+            with conn.connect() as test_conn:
+                result = test_conn.execute("SELECT @@VERSION as version, GETDATE() as current_time")
+                data = result.fetchone()
+                st.success("✅ Basic query successful")
+                st.write(f"SQL Version: {data[0][:50]}...")
+                st.write(f"Current Time: {data[1]}")
+        else:
+            # Direct connection
             cursor = conn.cursor()
-
-            columns_query = f"""
-            SELECT COLUMN_NAME, DATA_TYPE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = '{table_name}'
-            ORDER BY ORDINAL_POSITION
-            """
-
-            cursor.execute(columns_query)
-            columns = cursor.fetchall()
-
+            cursor.execute("SELECT @@VERSION as version, GETDATE() as current_time")
+            data = cursor.fetchone()
             cursor.close()
+            st.success("✅ Basic query successful")
+            st.write(f"SQL Version: {data[0][:50]}...")
+            st.write(f"Current Time: {data[1]}")
+        
+        # Test schema fetch
+        schema = get_db_schema()
+        if schema:
+            st.success(f"✅ Schema fetch successful: {len(schema)} tables")
+            
+            # Show table list
+            table_list = list(schema.keys())
+            st.write("**Available Tables:**")
+            for table in table_list:
+                st.write(f"- {table} ({len(schema[table])} columns)")
+        else:
+            st.warning("⚠️ Schema fetch returned empty result")
+            
+    except Exception as e:
+        st.error(f"❌ Database test failed: {e}")
 
-            return [(col[0], col[1]) for col in columns]
-        except Exception as e:
-            print(f"Error retrieving table schema: {e}")
-            return None
+
+def insert_sample_data_if_empty():
+    """Insert sample data if accounts_data table is empty."""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+        
+        # Check if table has data
+        if hasattr(conn, 'execute'):
+            with conn.connect() as test_conn:
+                result = test_conn.execute("SELECT COUNT(*) FROM accounts_data")
+                count = result.fetchone()[0]
+        else:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM accounts_data")
+            count = cursor.fetchone()[0]
+            cursor.close()
+        
+        if count == 0:
+            st.sidebar.info("Inserting sample data...")
+            # Insert minimal sample data
+            sample_data = [
+                ('ACC001', 'CUST001', 'Savings', 'AED', '2020-01-01', 5000.00, '2021-01-01', '2021-01-01', 'Yes', 'No', 'No'),
+                ('ACC002', 'CUST002', 'Current', 'AED', '2021-01-01', 15000.00, '2024-01-01', '2024-01-01', 'No', 'Yes', 'Yes'),
+            ]
+            
+            insert_sql = """
+            INSERT INTO accounts_data 
+            (Account_ID, Customer_ID, Account_Type, Currency, Account_Creation_Date, 
+             Current_Balance, Date_Last_Cust_Initiated_Activity, Date_Last_Customer_Communication_Any_Type,
+             Expected_Account_Dormant, Customer_Address_Known, Customer_Has_Active_Liability_Account)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            
+            if hasattr(conn, 'execute'):
+                with conn.connect() as insert_conn:
+                    for row in sample_data:
+                        insert_conn.execute(insert_sql, row)
+                    insert_conn.commit()
+            else:
+                cursor = conn.cursor()
+                for row in sample_data:
+                    cursor.execute(insert_sql, row)
+                conn.commit()
+                cursor.close()
+            
+            st.sidebar.success("✅ Sample data inserted")
+            return True
+            
+    except Exception as e:
+        st.sidebar.warning(f"Sample data insertion failed: {e}")
+        return False
+    
+    return False
