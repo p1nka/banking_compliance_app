@@ -41,3 +41,5 @@ pymssql
 sqlalchemy
 # Backup option if pymssql fails
 psycopg2-binary
+
+azure-identity
