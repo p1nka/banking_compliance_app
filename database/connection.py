@@ -16,7 +16,7 @@ from datetime import datetime
 # Global connection pool and keep-alive settings
 CONNECTION_POOL = {}
 LAST_ACTIVITY = {}
-CONNECTION_TIMEOUT = 3600  # 1 hour before forced reconnection
+CONNECTION_TIMEOUT = 10800  # 1 hour before forced reconnection
 CONNECTION_KEEPALIVE = 300  # 5 minutes between keepalive pings
 KEEPALIVE_ENABLED = True
 
@@ -187,12 +187,12 @@ def test_connection_query(connection, connection_type):
     try:
         if connection_type == "SQLAlchemy":
             with connection.connect() as test_conn:
-                result = test_conn.execute("SELECT 1 as test")
+                result = test_conn.execute("SELECT 1")
                 row = result.fetchone()
                 return row and row[0] == 1
         else:
             cursor = connection.cursor()
-            cursor.execute("SELECT 1 as test")
+            cursor.execute("SELECT 1")
             result = cursor.fetchone()
             cursor.close()
             return result and result[0] == 1
@@ -432,17 +432,17 @@ def test_database_connection():
         if conn is None:
             return False, "No connection established"
         
-        # Test with a simple query
+        # Test with a simple query (fixed SQL syntax)
         if hasattr(conn, 'execute'):
             # SQLAlchemy engine
             with conn.connect() as test_conn:
-                result = test_conn.execute("SELECT GETDATE() as current_time, DB_NAME() as db_name")
+                result = test_conn.execute("SELECT GETDATE(), DB_NAME()")
                 row = result.fetchone()
                 return True, f"Connected to {row[1]} at {row[0]}"
         else:
             # Direct pymssql connection
             cursor = conn.cursor()
-            cursor.execute("SELECT GETDATE() as current_time, DB_NAME() as db_name")
+            cursor.execute("SELECT GETDATE(), DB_NAME()")
             row = cursor.fetchone()
             cursor.close()
             return True, f"Connected to {row[1]} at {row[0]}"
