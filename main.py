@@ -6,7 +6,7 @@ import hashlib
 import hmac
 
 import ui
-from database.connection import get_db_connection
+from database.connection import maintain_connection, wakeup_connection, perform_keepalive
 
 # ⚠️ IMPORTANT: Set page config FIRST, before any other imports or operations ⚠️
 st.set_page_config(
@@ -189,7 +189,7 @@ if check_password():
 
     general_threshold_dt = report_dt - timedelta(days=flagging_inactivity_days)
     freeze_threshold_dt = report_dt - timedelta(days=freeze_inactivity_days)
-
+    maintain_connection()
     # Render the sidebar with upload options
     render_sidebar()
 
