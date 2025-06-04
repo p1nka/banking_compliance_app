@@ -22,7 +22,7 @@ DB_DRIVER = os.getenv("DB_DRIVER", "{ODBC Driver 18 for SQL Server}")
 # AI Model configuration
 AI_MODEL_PROVIDER = os.getenv("AI_MODEL_PROVIDER", "groq")
 AI_MODEL_NAME = os.getenv("AI_MODEL_NAME", "llama3.3-70b-versatile")
-AI_API_KEY = os.getenv("AI_API_KEY", "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")
+AI_API_KEY = os.getenv("AI_API_KEY", "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")
 
 # Application configuration
 APP_NAME = "Banking Compliance Assistant"
