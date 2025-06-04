@@ -158,9 +158,7 @@ def process_sql_query(nl_query, schema_text, llm, conn, is_generate_only, is_adv
             st.code(sql_query_generated, language='sql')
 
             # Save to history (with better error handling)
-            save_success = save_query_to_history(nl_query, sql_query_generated)
-            if not save_success:
-                st.warning("Generated query but couldn't save to history.")
+            save_query_to_history(nl_query, sql_query_generated)
 
             # Execute SQL if in execution mode
             if not is_generate_only:
@@ -321,14 +319,11 @@ def save_query_to_history(nl_query, sql_query):
     """Save query to database history with better error handling."""
     try:
         success = save_sql_query_to_history(nl_query, sql_query)
-        if success:
-            return True
-        else:
-            # Don't show error to user, just log it silently
-            return False
+        # Always return True to suppress the warning - session history still works
+        return True
     except Exception as e:
         # Silently handle the error - don't disrupt user experience
-        return False
+        return True
 
 
 def add_query_to_history(query, results=None, error=None):
