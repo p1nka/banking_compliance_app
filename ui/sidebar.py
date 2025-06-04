@@ -106,27 +106,119 @@ def handle_upload_method(upload_method):
     return uploaded_data_source
 
 
-def handle_sql_upload():
-    """Handle loading data from Azure SQL Database."""
-    st.sidebar.subheader("Azure SQL Data Loader")
+st.sidebar.subheader("Azure SQL Data Loader")
     
-    # Simple table selector
-    table_options = ["accounts_data", "dormant_flags", "dormant_ledger", "insight_log"]
-    selected_table = st.sidebar.selectbox(
+    # Connection status indicator
+    conn = get_db_connection()
+    if conn:
+        st.sidebar.success("✅ Database Connected")
+    else:
+        st.sidebar.error("❌ Database Connection Failed")
+        return None
+    
+    # Get available tables
+    try:
+        if hasattr(conn, 'execute'):
+            # SQLAlchemy engine
+            with conn.connect() as test_conn:
+                tables_result = test_conn.execute("""
+                    SELECT TABLE_NAME 
+                    FROM INFORMATION_SCHEMA.TABLES 
+                    WHERE TABLE_TYPE = 'BASE TABLE'
+                    ORDER BY TABLE_NAME
+                """)
+                available_tables = [row[0] for row in tables_result]
+        else:
+            # Direct connection
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT TABLE_NAME 
+                FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_TYPE = 'BASE TABLE'
+                ORDER BY TABLE_NAME
+            """)
+            available_tables = [row[0] for row in cursor.fetchall()]
+            cursor.close()
+            
+        if not available_tables:
+            st.sidebar.warning("No tables found in database")
+            return None
+            
+    except Exception as e:
+        st.sidebar.error(f"Error fetching tables: {e}")
+        return None
+    
+    # Table selector with row counts
+    st.sidebar.write("**Available Tables:**")
+    
+    # Show table info
+    table_info = {}
+    for table in available_tables:
+        try:
+            if hasattr(conn, 'execute'):
+                with conn.connect() as test_conn:
+                    count_result = test_conn.execute(f"SELECT COUNT(*) FROM [{table}]")
+                    row_count = count_result.fetchone()[0]
+            else:
+                cursor = conn.cursor()
+                cursor.execute(f"SELECT COUNT(*) FROM [{table}]")
+                row_count = cursor.fetchone()[0]
+                cursor.close()
+            table_info[table] = row_count
+        except:
+            table_info[table] = "Error"
+    
+    # Display table options with row counts
+    table_options = []
+    for table in available_tables:
+        count = table_info[table]
+        if isinstance(count, int):
+            table_options.append(f"{table} ({count:,} rows)")
+        else:
+            table_options.append(f"{table} (unknown rows)")
+    
+    selected_table_option = st.sidebar.selectbox(
         "Select table to load:",
         table_options,
         key="table_selector"
     )
-
+    
+    # Extract actual table name
+    selected_table = selected_table_option.split(" (")[0] if selected_table_option else None
+    
+    # Record limit selector
+    record_limit = st.sidebar.selectbox(
+        "Records to load:",
+        [100, 500, 1000, 5000, "All"],
+        index=2,  # Default to 1000
+        key="record_limit_selector"
+    )
+    
+    # Query preview
+    if selected_table:
+        if record_limit == "All":
+            query_preview = f"SELECT * FROM [{selected_table}]"
+        else:
+            query_preview = f"SELECT TOP {record_limit} * FROM [{selected_table}]"
+        
+        with st.sidebar.expander("Query Preview"):
+            st.code(query_preview, language="sql")
+    
     # Load button
     if st.sidebar.button("Load from Database", key="load_db_button"):
-        return load_data_from_database(selected_table)
-
+        if selected_table:
+            return load_data_from_database(selected_table, record_limit)
+        else:
+            st.sidebar.error("Please select a table")
+            return None
+    
     return None
 
 
-def load_data_from_database(table_name):
-    """Load data from database table."""
+
+def load_data_from_database(table_name, record_limit=1000):
+    """Load data from database table and return as DataFrame."""
+    
     with st.spinner(f"⏳ Loading data from {table_name}..."):
         try:
             conn = get_db_connection()
@@ -134,29 +226,55 @@ def load_data_from_database(table_name):
                 st.sidebar.error("❌ Database connection failed")
                 return None
 
-            # Simple query to get all data
-            query = f"SELECT TOP 1000 * FROM {table_name}"
-            df = pd.read_sql(query, conn)
+            # Build query based on record limit
+            if record_limit == "All":
+                query = f"SELECT * FROM [{table_name}]"
+            else:
+                query = f"SELECT TOP {record_limit} * FROM [{table_name}]"
+
+            st.sidebar.info(f"Executing: {query}")
+            
+            # Execute query and load into DataFrame
+            if hasattr(conn, 'execute'):
+                # SQLAlchemy engine
+                df = pd.read_sql(query, conn)
+            else:
+                # Direct connection (pymssql/pyodbc)
+                df = pd.read_sql(query, conn)
 
             if df.empty:
                 st.sidebar.warning(f"Table '{table_name}' has no data.")
                 return None
-            else:
-                st.sidebar.success(f"✅ Loaded {len(df)} rows from '{table_name}'")
+            
+            # Show success message with data info
+            st.sidebar.success(f"✅ Loaded {len(df)} rows, {len(df.columns)} columns from '{table_name}'")
+            
+            # Show preview in sidebar
+            with st.sidebar.expander("📋 Data Preview"):
+                st.dataframe(df.head(3), use_container_width=True)
                 
-                # Show preview
-                with st.sidebar.expander("Preview Data"):
-                    st.dataframe(df.head(3))
-                
-                return df
+                # Show column info
+                st.write("**Columns:**")
+                for col in df.columns:
+                    dtype = str(df[col].dtype)
+                    non_null = df[col].count()
+                    st.write(f"- {col}: {dtype} ({non_null}/{len(df)} non-null)")
+            
+            # Store loaded data in session state for immediate processing
+            st.session_state["sql_loaded_data"] = df
+            st.session_state["sql_source_table"] = table_name
+            
+            return df
 
         except Exception as e:
             st.sidebar.error(f"❌ Error loading data: {e}")
+            st.sidebar.exception(e)  # Show full traceback for debugging
             return None
 
 
 def process_uploaded_data(uploaded_data_source):
-    """Process the uploaded data and update session state."""
+    """Enhanced process_uploaded_data to handle SQL data properly."""
+    
     # Initialize session state variables if they don't exist
     if SESSION_COLUMN_MAPPING not in st.session_state:
         st.session_state[SESSION_COLUMN_MAPPING] = {}
@@ -166,15 +284,20 @@ def process_uploaded_data(uploaded_data_source):
         progress_text.info("Starting data processing...")
 
         try:
-            # Process the data
+            # Handle different data source types
             if isinstance(uploaded_data_source, pd.DataFrame):
+                # Data is already a DataFrame (from SQL load)
                 data_copy = uploaded_data_source.copy()
-                progress_text.info("Processing DataFrame...")
+                progress_text.info("Processing SQL DataFrame...")
+                source_info = f"SQL table: {st.session_state.get('sql_source_table', 'Unknown')}"
+                
             else:
+                # Data from file upload or URL
                 data_copy = uploaded_data_source
                 progress_text.info("Parsing uploaded data...")
+                source_info = "Uploaded file/URL"
 
-            # Parse the data
+            # Parse/standardize the data
             progress_text.info("Standardizing data...")
             df_parsed = parse_data(data_copy)
             
@@ -189,6 +312,9 @@ def process_uploaded_data(uploaded_data_source):
         st.session_state[SESSION_DATA_PROCESSED] = True
 
         progress_text.success(f"✓ Processed {len(df_parsed)} rows, {len(df_parsed.columns)} columns")
+
+        # Show data source info
+        st.sidebar.info(f"📊 Data Source: {source_info}")
 
         # Update chat message if available
         try:
@@ -206,12 +332,12 @@ def process_uploaded_data(uploaded_data_source):
             if cols_info:
                 cols_example = ', '.join(cols_info)
                 initial_message = (
-                    f"Data ({len(df_parsed)} rows) processed! "
+                    f"Data ({len(df_parsed)} rows) from {source_info} processed! "
                     f"Columns include: {cols_example}...\n"
                     f"You can now use the analysis modes."
                 )
             else:
-                initial_message = f"Data ({len(df_parsed)} rows) processed successfully!"
+                initial_message = f"Data ({len(df_parsed)} rows) from {source_info} processed successfully!"
 
             st.session_state[SESSION_CHAT_MESSAGES] = [
                 {"role": "assistant", "content": initial_message}
@@ -221,6 +347,19 @@ def process_uploaded_data(uploaded_data_source):
             pass
 
         st.sidebar.success("✅ Data processed successfully!")
+        
+        # Show processing summary
+        with st.sidebar.expander("📈 Processing Summary"):
+            st.write(f"**Source:** {source_info}")
+            st.write(f"**Rows:** {len(df_parsed):,}")
+            st.write(f"**Columns:** {len(df_parsed.columns)}")
+            
+            # Show data types
+            st.write("**Data Types:**")
+            dtype_counts = df_parsed.dtypes.value_counts()
+            for dtype, count in dtype_counts.items():
+                st.write(f"- {dtype}: {count} columns")
+        
         st.balloons()
 
     elif df_parsed is not None and df_parsed.empty:
