@@ -85,28 +85,135 @@ def handle_upload_method(upload_method):
 
     elif upload_method == "**Upload via URL**":
         url_input = st.sidebar.text_input("Enter CSV file URL:", key="url_input")
-        if st.sidebar.button("Fetch Data from URL", key="fetch_url_button"):
-            if url_input:
-                try:
-                    with st.spinner("⏳ Fetching data from URL..."):
-                        response = requests.get(url_input, timeout=30)
-                        response.raise_for_status()
-                        uploaded_data_source = response.text
-                        st.sidebar.success("✅ Fetched! Ready to process.")
-                except requests.exceptions.RequestException as e:
-                    st.sidebar.error(f"❌ URL Fetch Error: {e}")
-                except Exception as e:
-                    st.sidebar.error(f"❌ Error processing URL data: {e}")
+        
+        # Show URL validation info
+        if url_input:
+            if url_input.startswith(('http://', 'https://')):
+                st.sidebar.info("✅ Valid URL format")
             else:
-                st.sidebar.warning("⚠️ Please enter a valid URL")
+                st.sidebar.warning("⚠️ URL should start with http:// or https://")
+        
+        # Check if data was already fetched from URL
+        if "url_fetched_data" in st.session_state and st.session_state.get("last_url") == url_input:
+            uploaded_data_source = st.session_state["url_fetched_data"]
+            st.sidebar.success("✅ URL data ready for processing")
+            # Show preview of fetched data
+            try:
+                preview_lines = uploaded_data_source.split('\n')[:3]
+                with st.sidebar.expander("📋 Data Preview"):
+                    for line in preview_lines:
+                        st.text(line[:80] + "..." if len(line) > 80 else line)
+            except:
+                pass
+        else:
+            # Fetch button
+            if st.sidebar.button("Fetch Data from URL", key="fetch_url_button"):
+                if url_input:
+                    if not url_input.startswith(('http://', 'https://')):
+                        st.sidebar.error("❌ Please enter a valid URL starting with http:// or https://")
+                    else:
+                        try:
+                            with st.spinner("⏳ Fetching data from URL..."):
+                                # Add headers to mimic browser request
+                                headers = {
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                                }
+                                
+                                response = requests.get(url_input, timeout=30, headers=headers)
+                                response.raise_for_status()
+                                
+                                # Check if response is actually CSV-like data
+                                content = response.text
+                                
+                                # Basic validation for CSV content
+                                if not content.strip():
+                                    st.sidebar.error("❌ URL returned empty content")
+                                elif len(content.split('\n')) < 2:
+                                    st.sidebar.error("❌ URL content doesn't appear to be CSV (less than 2 lines)")
+                                elif ',' not in content.split('\n')[0]:
+                                    st.sidebar.warning("⚠️ Warning: First line doesn't contain commas. May not be CSV format.")
+                                
+                                # Store fetched data in session state
+                                st.session_state["url_fetched_data"] = content
+                                st.session_state["last_url"] = url_input
+                                
+                                # Show success with data info
+                                lines = content.split('\n')
+                                total_lines = len([line for line in lines if line.strip()])
+                                st.sidebar.success(f"✅ Fetched! {total_lines} lines of data")
+                                
+                                # Show preview
+                                with st.sidebar.expander("📋 Data Preview"):
+                                    # Show first few lines
+                                    preview_lines = [line for line in lines[:5] if line.strip()]
+                                    for i, line in enumerate(preview_lines):
+                                        display_line = line[:80] + "..." if len(line) > 80 else line
+                                        if i == 0:
+                                            st.text(f"Header: {display_line}")
+                                        else:
+                                            st.text(f"Row {i}: {display_line}")
+                                    
+                                    if total_lines > 5:
+                                        st.text(f"... and {total_lines - 5} more lines")
+                                
+                                # Set uploaded_data_source for processing
+                                uploaded_data_source = content
+                                
+                        except requests.exceptions.Timeout:
+                            st.sidebar.error("❌ Request timed out. Try a different URL or check your connection.")
+                        except requests.exceptions.ConnectionError:
+                            st.sidebar.error("❌ Connection error. Check the URL and your internet connection.")
+                        except requests.exceptions.HTTPError as e:
+                            if e.response.status_code == 404:
+                                st.sidebar.error("❌ URL not found (404). Please check the URL.")
+                            elif e.response.status_code == 403:
+                                st.sidebar.error("❌ Access forbidden (403). The URL may require authentication.")
+                            else:
+                                st.sidebar.error(f"❌ HTTP Error {e.response.status_code}: {e}")
+                        except requests.exceptions.RequestException as e:
+                            st.sidebar.error(f"❌ URL Fetch Error: {e}")
+                        except Exception as e:
+                            st.sidebar.error(f"❌ Error processing URL data: {e}")
+                else:
+                    st.sidebar.warning("⚠️ Please enter a valid URL")
 
- elif upload_method == "**Load Data from Azure SQL Database**":
-        uploaded_data_source = handle_sql_upload()
+        # Additional help for URL upload
+        with st.sidebar.expander("💡 URL Upload Tips"):
+            st.markdown("""
+            **Supported URLs:**
+            - Direct links to CSV files
+            - GitHub raw file URLs
+            - Google Sheets export URLs
+            - Any publicly accessible CSV endpoint
+            
+            **Example URLs:**
+            - `https://raw.githubusercontent.com/user/repo/main/data.csv`
+            - `https://docs.google.com/spreadsheets/d/.../export?format=csv`
+            - `https://example.com/data/accounts.csv`
+            
+            **Requirements:**
+            - Must be publicly accessible (no authentication)
+            - Should return CSV format data
+            - File size should be reasonable (<100MB)
+            """)
+
+    elif upload_method == "**Load Data from Azure SQL Database**":
+        # Check if data was loaded from SQL
+        if "sql_loaded_data" in st.session_state:
+            uploaded_data_source = st.session_state["sql_loaded_data"]
+            st.sidebar.info(f"✅ SQL data ready: {len(uploaded_data_source)} rows")
+            # Clear the temporary storage
+            del st.session_state["sql_loaded_data"]
+        else:
+            # Show the SQL upload interface
+            uploaded_data_source = handle_sql_upload()
 
     return uploaded_data_source
-def handle_sql_upload():
 
-st.sidebar.subheader("Azure SQL Data Loader")
+
+def handle_sql_upload():
+    """Handle loading data from Azure SQL Database."""
+    st.sidebar.subheader("Azure SQL Data Loader")
     
     # Connection status indicator
     conn = get_db_connection()
@@ -213,7 +320,6 @@ st.sidebar.subheader("Azure SQL Data Loader")
             return None
     
     return None
-return None
 
 
 def load_data_from_database(table_name, record_limit=1000):
