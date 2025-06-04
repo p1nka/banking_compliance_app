@@ -100,7 +100,7 @@ def handle_upload_method(upload_method):
             else:
                 st.sidebar.warning("⚠️ Please enter a valid URL")
 
-    elif upload_method == "**Load Data from Azure SQL Database**":
+ elif upload_method == "**Load Data from Azure SQL Database**":
         uploaded_data_source = handle_sql_upload()
 
     return uploaded_data_source
