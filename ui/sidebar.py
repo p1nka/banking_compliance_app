@@ -104,7 +104,7 @@ def handle_upload_method(upload_method):
         uploaded_data_source = handle_sql_upload()
 
     return uploaded_data_source
-
+def handle_sql_upload():
 
 st.sidebar.subheader("Azure SQL Data Loader")
     
@@ -213,7 +213,7 @@ st.sidebar.subheader("Azure SQL Data Loader")
             return None
     
     return None
-
+return None
 
 
 def load_data_from_database(table_name, record_limit=1000):
