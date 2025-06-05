@@ -169,28 +169,9 @@ def process_sql_query(nl_query, schema_text, llm, conn, is_generate_only, is_adv
 
 
 def generate_sql_from_nl(nl_query, schema_text, llm, is_advanced_mode=False):
-    """Generate SQL from natural language using LLM."""
-    try:
-        # Use standard prompt (we removed the advanced one to avoid complexity)
-        prompt_template = SQL_GENERATION_PROMPT
-        
-        nl_to_sql_prompt = PromptTemplate.from_template(prompt_template)
-        nl_to_sql_chain = nl_to_sql_prompt | llm | StrOutputParser()
-
-        sql_query_raw = nl_to_sql_chain.invoke({
-            "schema": schema_text,
-            "question": nl_query.strip()
-        })
-
-        # Clean up the generated SQL
-        sql_query_generated = clean_sql_query(sql_query_raw)
-
-        # Validate the generated query
-        if not sql_query_generated or not sql_query_generated.lower().strip().startswith("select"):
-            st.error("Generated text does not start with SELECT or is empty.")
-            return None
-
-        return sql_query_generated
+    """Generate SQL from natural language using enhanced LLM."""
+    return enhanced_generate_sql_from_nl(nl_query, schema_text, llm, is_advanced_mode)
+    
 
     except Exception as e:
         st.error(f"SQL generation error: {e}")
@@ -198,153 +179,8 @@ def generate_sql_from_nl(nl_query, schema_text, llm, is_advanced_mode=False):
 
 
 def execute_sql_query(sql_query, conn):
-    """Execute SQL query and display results with automatic visualizations."""
-    try:
-        cleaned_query = clean_sql_query(sql_query)
-        
-        st.info(f"🔍 **Executing SQL Query**")
-        st.code(cleaned_query, language='sql')
-
-        with st.spinner("⏳ Executing query..."):
-            # Handle different connection types
-            if hasattr(conn, 'execute'):
-                # SQLAlchemy engine
-                results_df = pd.read_sql(cleaned_query, conn)
-            else:
-                # Direct connection (pymssql/pyodbc)
-                results_df = pd.read_sql(cleaned_query, conn)
-
-        # Display results
-        st.subheader("Query Results")
-        if not results_df.empty:
-            # Show basic statistics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Rows Returned", len(results_df))
-            with col2:
-                st.metric("Columns", len(results_df.columns))
-            with col3:
-                # Calculate memory usage
-                memory_mb = results_df.memory_usage(deep=True).sum() / 1024 / 1024
-                st.metric("Memory Usage", f"{memory_mb:.1f} MB")
-            
-            # Auto-generate visualizations
-            auto_generate_visualizations(results_df)
-            
-            # Display the data table
-            st.subheader("📊 Data Table")
-            st.dataframe(results_df, use_container_width=True, height=400)
-            
-            # Show column information
-            with st.expander("📋 Column Information"):
-                col_info = []
-                for col in results_df.columns:
-                    dtype = str(results_df[col].dtype)
-                    non_null = results_df[col].count()
-                    null_count = len(results_df) - non_null
-                    unique_count = results_df[col].nunique()
-                    
-                    col_info.append({
-                        'Column': col,
-                        'Data Type': dtype,
-                        'Non-Null': non_null,
-                        'Null': null_count,
-                        'Unique Values': unique_count
-                    })
-                
-                col_info_df = pd.DataFrame(col_info)
-                st.dataframe(col_info_df, use_container_width=True)
-
-            # Add download button
-            csv_data = results_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Results as CSV",
-                data=csv_data,
-                file_name=f"sql_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                key="download_results_csv"
-            )
-
-            # Add to history with results
-            add_query_to_history(cleaned_query, results_df)
-        else:
-            st.info("✅ Query executed successfully but returned no results.")
-            add_query_to_history(cleaned_query, results_df)
-
-    except Exception as e:
-        st.error(f"❌ Query execution error: {e}")
-        
-        # Show specific error guidance
-        error_str = str(e).lower()
-        if "invalid column name" in error_str:
-            st.info("💡 **Tip:** Check if all column names exist in the database schema above.")
-        elif "invalid object name" in error_str:
-            st.info("💡 **Tip:** Check if the table name is correct. Available tables are shown in the schema.")
-        elif "syntax error" in error_str:
-            st.info("💡 **Tip:** There's a SQL syntax error. Try regenerating the query or check the SQL manually.")
-        
-        add_query_to_history(sql_query, None, error=str(e))
-
-
-def clean_sql_query(sql_text):
-    """Clean and extract valid SQL from raw text."""
-    if not sql_text:
-        return None
-
-    # Remove markdown code blocks if present
-    sql_text = re.sub(r"^```sql\s*|\s*```$", "", sql_text, flags=re.MULTILINE).strip()
-    sql_text = re.sub(r"^```\s*|\s*```$", "", sql_text.strip())
-
-    # Look for SELECT statement
-    match = re.search(r"SELECT.*", sql_text, re.IGNORECASE | re.DOTALL)
-    if match:
-        sql_query = match.group(0).strip()
-        return sql_query
-
-    return sql_text.strip()
-
-
-def format_schema_for_display(schema):
-    """Format schema dictionary for display."""
-    schema_text = "Database Schema:\n"
-    for table_name, columns_list in schema.items():
-        schema_text += f"\nTable: {table_name}\n"
-        schema_text += "Columns:\n"
-        for name, dtype in columns_list:
-            schema_text += f"  - {name} ({dtype})\n"
-    return schema_text
-
-
-def save_query_to_history(nl_query, sql_query):
-    """Save query to database history with better error handling."""
-    try:
-        success = save_sql_query_to_history(nl_query, sql_query)
-        # Always return True to suppress the warning - session history still works
-        return True
-    except Exception as e:
-        # Silently handle the error - don't disrupt user experience
-        return True
-
-
-def add_query_to_history(query, results=None, error=None):
-    """Add query to session history."""
-    if 'query_history' not in st.session_state:
-        st.session_state.query_history = []
-
-    history_item = {
-        'query': query,
-        'results': results,
-        'error': error,
-        'timestamp': pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'ai_generated': True
-    }
-
-    st.session_state.query_history.insert(0, history_item)
-
-    # Limit history size
-    if len(st.session_state.query_history) > 20:
-        st.session_state.query_history = st.session_state.query_history[:20]
-
+    """Execute SQL query with enhanced datetime handling."""
+    return enhanced_execute_sql_query(sql_query, conn)
 
 def show_query_history():
     """Display query history."""
@@ -649,7 +485,395 @@ def show_database_stats():
                         st.write(f"- **{table_name}:** Error getting count")
     except Exception as e:
         st.error(f"Error getting database stats: {e}")
+# ADD THESE FUNCTIONS TO ui/sqlbot_ui.py
 
+def enhanced_generate_sql_from_nl(nl_query, schema_text, llm, is_advanced_mode=False):
+    """
+    Enhanced SQL generation with datetime-aware prompting.
+    """
+    try:
+        # Enhanced prompt template with datetime awareness
+        enhanced_prompt_template = create_datetime_aware_prompt()
+        
+        nl_to_sql_prompt = PromptTemplate.from_template(enhanced_prompt_template)
+        nl_to_sql_chain = nl_to_sql_prompt | llm | StrOutputParser()
+
+        sql_query_raw = nl_to_sql_chain.invoke({
+            "schema": schema_text,
+            "question": nl_query.strip()
+        })
+
+        # Clean up the generated SQL
+        sql_query_generated = clean_sql_query(sql_query_raw)
+
+        # Validate the generated query
+        if not sql_query_generated or not sql_query_generated.lower().strip().startswith("select"):
+            st.error("Generated text does not start with SELECT or is empty.")
+            return None
+
+        return sql_query_generated
+
+    except Exception as e:
+        st.error(f"SQL generation error: {e}")
+        return get_fallback_response("sql_generation")
+
+
+def create_datetime_aware_prompt():
+    """
+    Create an enhanced SQL generation prompt that's aware of actual datetime column types.
+    """
+    # Get datetime column information if available
+    datetime_info = st.session_state.get('datetime_columns_info', {})
+    
+    datetime_guidance = """
+IMPORTANT DATETIME GUIDELINES FOR YOUR DATABASE:
+- DATE columns (store only dates): Use 'YYYY-MM-DD' format
+- DATETIME2 columns (store date + time): Use 'YYYY-MM-DD HH:MM:SS' format
+- Always use proper date functions for comparisons
+
+SPECIFIC DATE COLUMN INFORMATION:
+"""
+    
+    if datetime_info:
+        for table_name, columns in datetime_info.items():
+            if columns:
+                datetime_guidance += f"\nTable {table_name}:\n"
+                for col_info in columns:
+                    col_name = col_info['column']
+                    col_type = col_info['formatted_type']
+                    datetime_guidance += f"  - {col_name}: {col_type}\n"
+                    
+                    # Add specific guidance based on type
+                    if col_info['type'] == 'date':
+                        datetime_guidance += f"    Use: WHERE {col_name} >= '2024-01-01'\n"
+                    elif col_info['type'] == 'datetime2':
+                        datetime_guidance += f"    Use: WHERE {col_name} >= '2024-01-01 00:00:00'\n"
+    
+    datetime_guidance += """
+COMMON DATE QUERY PATTERNS:
+- Last 30 days: WHERE date_column >= DATEADD(DAY, -30, GETDATE())
+- This year: WHERE YEAR(date_column) = YEAR(GETDATE())
+- Date range: WHERE date_column BETWEEN '2024-01-01' AND '2024-12-31'
+- Today: WHERE CAST(date_column AS DATE) = CAST(GETDATE() AS DATE)
+"""
+    
+    enhanced_prompt = f"""
+You are an expert SQL query generator for SQL Server/Azure SQL. Convert the natural language question to a syntactically correct SQL query.
+
+{datetime_guidance}
+
+Database Schema:
+{{schema}}
+
+Question: {{question}}
+
+Generate only the SQL query without any explanation or markdown formatting.
+Make sure to use the correct date formats and functions based on the column types shown above.
+"""
+    
+    return enhanced_prompt
+
+
+def enhanced_execute_sql_query(sql_query, conn):
+    """
+    Enhanced SQL query execution with better datetime handling.
+    """
+    try:
+        cleaned_query = clean_sql_query(sql_query)
+        
+        st.info(f"🔍 **Executing SQL Query**")
+        st.code(cleaned_query, language='sql')
+
+        with st.spinner("⏳ Executing query..."):
+            # Enhanced pandas.read_sql with datetime parsing
+            try:
+                # Try to identify datetime columns for parsing
+                datetime_columns = identify_datetime_columns_for_query(cleaned_query)
+                
+                if datetime_columns:
+                    results_df = pd.read_sql(
+                        cleaned_query, 
+                        conn,
+                        parse_dates=datetime_columns,
+                        dtype_backend='numpy_nullable'
+                    )
+                else:
+                    results_df = pd.read_sql(
+                        cleaned_query, 
+                        conn,
+                        parse_dates=True,
+                        dtype_backend='numpy_nullable'
+                    )
+            except Exception as parse_error:
+                # Fallback to basic read_sql
+                st.warning(f"Advanced datetime parsing failed, using basic method: {parse_error}")
+                results_df = pd.read_sql(cleaned_query, conn)
+            
+            # Post-process datetime columns that might have been missed
+            results_df = fix_datetime_columns(results_df)
+
+        # Display results with enhanced datetime formatting
+        st.subheader("Query Results")
+        if not results_df.empty:
+            # Show basic statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Rows Returned", len(results_df))
+            with col2:
+                st.metric("Columns", len(results_df.columns))
+            with col3:
+                memory_mb = results_df.memory_usage(deep=True).sum() / 1024 / 1024
+                st.metric("Memory Usage", f"{memory_mb:.1f} MB")
+            
+            # Enhanced auto-generate visualizations
+            auto_generate_visualizations_enhanced(results_df)
+            
+            # Display the data table with better datetime formatting
+            st.subheader("📊 Data Table")
+            formatted_df = format_datetime_for_display(results_df)
+            st.dataframe(formatted_df, use_container_width=True, height=400)
+            
+            # Show enhanced column information
+            show_enhanced_column_info(results_df)
+
+            # Add download button
+            csv_data = results_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Results as CSV",
+                data=csv_data,
+                file_name=f"sql_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                key="download_results_csv"
+            )
+
+            add_query_to_history(cleaned_query, results_df)
+        else:
+            st.info("✅ Query executed successfully but returned no results.")
+            add_query_to_history(cleaned_query, results_df)
+
+    except Exception as e:
+        st.error(f"❌ Query execution error: {e}")
+        
+        # Enhanced error guidance for datetime issues
+        error_str = str(e).lower()
+        if "conversion failed when converting date" in error_str:
+            st.info("💡 **DateTime Error:** Try using explicit date formats like 'YYYY-MM-DD' or use CONVERT/CAST functions.")
+            st.code("-- Example fixes:\nSELECT * FROM table WHERE date_column >= '2024-01-01'\n-- Or:\nSELECT * FROM table WHERE CAST(date_column AS DATE) = '2024-01-01'", language='sql')
+        elif "invalid column name" in error_str:
+            st.info("💡 **Tip:** Check if all column names exist in the database schema above.")
+        elif "invalid object name" in error_str:
+            st.info("💡 **Tip:** Check if the table name is correct. Available tables are shown in the schema.")
+        elif "syntax error" in error_str:
+            st.info("💡 **Tip:** There's a SQL syntax error. Try regenerating the query or check the SQL manually.")
+        
+        add_query_to_history(sql_query, None, error=str(e))
+
+
+def identify_datetime_columns_for_query(sql_query):
+    """
+    Try to identify which columns in the query might be datetime columns.
+    """
+    datetime_info = st.session_state.get('datetime_columns_info', {})
+    datetime_cols = []
+    
+    for table_name, columns in datetime_info.items():
+        for col_info in columns:
+            col_name = col_info['column']
+            if col_name.lower() in sql_query.lower():
+                datetime_cols.append(col_name)
+    
+    return datetime_cols if datetime_cols else None
+
+
+def fix_datetime_columns(df):
+    """Post-process DataFrame to fix datetime columns that pandas missed."""
+    import re
+    
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            # Try to detect if this is actually a datetime column
+            if is_datetime_column(df[col]):
+                try:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                except:
+                    pass  # If conversion fails, leave as is
+    return df
+
+
+def is_datetime_column(series):
+    """Heuristic to detect if an object column contains datetime values."""
+    if series.empty:
+        return False
+    
+    # Sample first few non-null values
+    sample = series.dropna().head(10)
+    if sample.empty:
+        return False
+    
+    datetime_count = 0
+    for value in sample:
+        if isinstance(value, str):
+            # Common datetime patterns
+            datetime_patterns = [
+                r'\d{4}-\d{2}-\d{2}',  # YYYY-MM-DD
+                r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}',  # YYYY-MM-DD HH:MM:SS
+                r'\d{2}/\d{2}/\d{4}',  # MM/DD/YYYY
+            ]
+            
+            for pattern in datetime_patterns:
+                if re.search(pattern, str(value)):
+                    datetime_count += 1
+                    break
+    
+    # If more than 50% look like datetimes, treat as datetime
+    return datetime_count / len(sample) > 0.5
+
+
+def format_datetime_for_display(df):
+    """Format datetime columns for better display in Streamlit."""
+    formatted_df = df.copy()
+    
+    for col in formatted_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(formatted_df[col]):
+            # Format datetime for display
+            formatted_df[col] = formatted_df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+            # Replace NaT with empty string
+            formatted_df[col] = formatted_df[col].fillna('')
+        elif pd.api.types.is_timedelta64_dtype(formatted_df[col]):
+            # Format timedelta for display
+            formatted_df[col] = formatted_df[col].astype(str)
+            formatted_df[col] = formatted_df[col].replace('NaT', '')
+    
+    return formatted_df
+
+
+def show_enhanced_column_info(df):
+    """Show enhanced column information including datetime details."""
+    with st.expander("📋 Enhanced Column Information"):
+        col_info = []
+        for col in df.columns:
+            dtype = str(df[col].dtype)
+            non_null = df[col].count()
+            null_count = len(df) - non_null
+            unique_count = df[col].nunique()
+            
+            # Add datetime-specific info
+            extra_info = ""
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                if non_null > 0:
+                    min_date = df[col].min()
+                    max_date = df[col].max()
+                    extra_info = f"Range: {min_date} to {max_date}"
+            elif pd.api.types.is_numeric_dtype(df[col]) and non_null > 0:
+                min_val = df[col].min()
+                max_val = df[col].max()
+                extra_info = f"Range: {min_val} to {max_val}"
+            
+            col_info.append({
+                'Column': col,
+                'Data Type': dtype,
+                'Non-Null': non_null,
+                'Null': null_count,
+                'Unique Values': unique_count,
+                'Additional Info': extra_info
+            })
+        
+        col_info_df = pd.DataFrame(col_info)
+        st.dataframe(col_info_df, use_container_width=True)
+
+
+def auto_generate_visualizations_enhanced(results_df):
+    """Enhanced auto-visualization with better datetime support."""
+    if results_df.empty or len(results_df) == 0:
+        return
+    
+    st.subheader("📈 Auto-Generated Visualizations")
+    
+    # Analyze the data structure with enhanced datetime detection
+    numeric_cols = results_df.select_dtypes(include=['number']).columns.tolist()
+    categorical_cols = results_df.select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    # Enhanced datetime detection
+    date_cols = []
+    for col in results_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(results_df[col]):
+            date_cols.append(col)
+    
+    # Filter categorical columns
+    categorical_cols = [col for col in categorical_cols 
+                       if not col.lower().endswith('_id') 
+                       and not col.lower().startswith('id')
+                       and results_df[col].nunique() <= 20
+                       and results_df[col].nunique() > 1
+                       and col not in date_cols]
+    
+    visualizations_created = 0
+    max_visualizations = 3
+    
+    try:
+        # Enhanced time series visualization
+        if date_cols and len(results_df) > 1 and visualizations_created < max_visualizations:
+            date_col = date_cols[0]
+            
+            try:
+                # Sort by date
+                df_sorted = results_df.sort_values(date_col)
+                
+                if numeric_cols:
+                    # Time series with numeric value
+                    num_col = numeric_cols[0]
+                    fig = px.line(
+                        df_sorted, 
+                        x=date_col, 
+                        y=num_col,
+                        title=f"{num_col.replace('_', ' ').title()} Over Time"
+                    )
+                    fig.update_xaxes(title=date_col.replace('_', ' ').title())
+                    fig.update_yaxes(title=num_col.replace('_', ' ').title())
+                else:
+                    # Count occurrences over time
+                    date_counts = df_sorted.groupby(df_sorted[date_col].dt.date).size().reset_index()
+                    date_counts.columns = ['date', 'count']
+                    fig = px.line(
+                        date_counts, 
+                        x='date', 
+                        y='count',
+                        title=f"Activity Over Time"
+                    )
+                
+                st.plotly_chart(fig, use_container_width=True, key=f"timeseries_{date_col}")
+                visualizations_created += 1
+                st.caption(f"📊 Time series chart showing trends over '{date_col}'")
+            except Exception as e:
+                st.write(f"Could not create time series: {e}")
+
+        # Continue with other visualization types from the original function...
+        # [Include the rest of the original auto_generate_visualizations logic here]
+        
+    except Exception as e:
+        st.error(f"Error in auto-visualization: {e}")
+
+
+def show_datetime_examples():
+    """Show specific examples for datetime queries."""
+    st.subheader("💡 DateTime Query Examples")
+    
+    examples = [
+        ("Recent records", "Show me records from the last 30 days"),
+        ("This year's data", "Show all accounts created this year"),
+        ("Date range", "Show accounts created between 2023-01-01 and 2023-12-31"),
+        ("Monthly summary", "Show count of accounts created by month"),
+        ("Activity today", "Show accounts with activity today")
+    ]
+    
+    st.write("**Click any datetime example to try it:**")
+    
+    cols = st.columns(len(examples))
+    for i, (title, query) in enumerate(examples):
+        with cols[i]:
+            if st.button(title, key=f"datetime_example_{i}", use_container_width=True):
+                st.session_state['sql_bot_nl_query_input'] = query
+                st.rerun()
 
 # Add this to show database stats
 if __name__ == "__main__":
