@@ -925,7 +925,7 @@ def diagnose_datetime_issues():
     except Exception as e:
         st.error(f"Diagnosis failed: {e}")
 
-python@st.cache_data(ttl=600)  # Cache for 10 minutes instead of 1 hour
+@st.cache_data(ttl=600)  # Cache for 10 minutes instead of 1 hour
 def get_db_schema():
     """
     Get database schema with enhanced datetime detection and multiple fallback methods.
