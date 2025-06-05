@@ -289,44 +289,6 @@ def create_support_tables_direct(cursor):
     except Exception as e:
         st.sidebar.warning(f"Could not create sql_query_history table: {e}")
 
-
-@st.cache_data(ttl=600)  # Cache for 10 minutes instead of 1 hour
-def get_db_schema():
-    """
-    Get database schema with multiple fallback methods and enhanced error handling.
-    """
-    try:
-        conn = get_db_connection()
-        if conn is None:
-            st.sidebar.warning("Cannot fetch schema: No database connection")
-            return get_fallback_schema()
-
-        # Try multiple schema retrieval methods
-        schema_methods = [
-            ("sys.tables", get_schema_sys_tables),
-            ("INFORMATION_SCHEMA", get_schema_information_schema),
-            ("Direct Query", get_schema_direct_query)
-        ]
-        
-        for method_name, method_func in schema_methods:
-            try:
-                schema_info = method_func(conn)
-                if schema_info:
-                    st.sidebar.success(f"✅ Schema loaded via {method_name}: {len(schema_info)} tables")
-                    return schema_info
-            except Exception as method_error:
-                st.sidebar.warning(f"Schema method '{method_name}' failed: {str(method_error)[:100]}")
-                continue
-        
-        # If all methods fail, return fallback schema
-        st.sidebar.warning("⚠️ All schema methods failed, using fallback schema")
-        return get_fallback_schema()
-
-    except Exception as e:
-        st.sidebar.error(f"Schema fetch error: {e}")
-        return get_fallback_schema()
-
-
 def get_schema_sys_tables(conn):
     """Get schema using sys.tables and sys.columns (most reliable for Azure SQL)"""
     schema_info = {}
@@ -739,3 +701,271 @@ def insert_sample_data_if_empty():
         return False
     
     return False
+
+def enhanced_get_schema_with_datetime_info(conn):
+    """
+    Enhanced schema detection that specifically handles datetime types properly.
+    """
+    try:
+        # Enhanced query that specifically identifies datetime types
+        enhanced_schema_query = """
+        SELECT 
+            t.name AS table_name,
+            c.name AS column_name,
+            ty.name AS data_type,
+            c.max_length,
+            c.precision,
+            c.scale,
+            c.is_nullable,
+            CASE 
+                WHEN ty.name IN ('datetime', 'datetime2', 'date', 'time', 'datetimeoffset') 
+                THEN 'DATETIME_TYPE'
+                WHEN ty.name IN ('int', 'bigint', 'decimal', 'float', 'money', 'numeric', 'real', 'smallint', 'smallmoney', 'tinyint')
+                THEN 'NUMERIC_TYPE'
+                ELSE 'OTHER_TYPE'
+            END AS type_category,
+            CASE 
+                WHEN ty.name = 'datetime2' THEN CONCAT('datetime2(', c.scale, ')')
+                WHEN ty.name = 'decimal' THEN CONCAT('decimal(', c.precision, ',', c.scale, ')')
+                WHEN ty.name = 'nvarchar' AND c.max_length = -1 THEN 'nvarchar(MAX)'
+                WHEN ty.name = 'nvarchar' THEN CONCAT('nvarchar(', c.max_length/2, ')')
+                WHEN ty.name = 'varchar' AND c.max_length = -1 THEN 'varchar(MAX)'
+                WHEN ty.name = 'varchar' THEN CONCAT('varchar(', c.max_length, ')')
+                ELSE ty.name
+            END AS formatted_type
+        FROM sys.tables t
+        INNER JOIN sys.columns c ON t.object_id = c.object_id
+        INNER JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+        WHERE t.type = 'U'
+        ORDER BY t.name, c.column_id
+        """
+        
+        if hasattr(conn, 'connect'):
+            with conn.connect() as connection:
+                result = connection.execute(enhanced_schema_query)
+                return _format_enhanced_schema_result(result)
+        elif hasattr(conn, 'execute'):
+            result = conn.execute(enhanced_schema_query)
+            return _format_enhanced_schema_result(result)
+        else:
+            cursor = conn.cursor()
+            cursor.execute(enhanced_schema_query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return _format_enhanced_schema_result_direct(rows)
+            
+    except Exception as e:
+        st.error(f"Enhanced schema detection failed: {e}")
+        return None
+
+
+def _format_enhanced_schema_result(result):
+    """Format enhanced schema result with datetime type information."""
+    schema_info = {}
+    datetime_columns = {}
+    
+    for row in result:
+        table_name, column_name, data_type, max_length, precision, scale, is_nullable, type_category, formatted_type = row
+        
+        if table_name not in schema_info:
+            schema_info[table_name] = []
+            datetime_columns[table_name] = []
+        
+        nullable_info = "NULL" if is_nullable else "NOT NULL"
+        schema_info[table_name].append((column_name, f"{formatted_type} {nullable_info}"))
+        
+        # Track datetime columns specifically
+        if type_category == 'DATETIME_TYPE':
+            datetime_columns[table_name].append({
+                'column': column_name,
+                'type': data_type,
+                'formatted_type': formatted_type,
+                'precision': precision,
+                'scale': scale
+            })
+    
+    # Store datetime info in session state for later use
+    if 'datetime_columns_info' not in st.session_state:
+        st.session_state['datetime_columns_info'] = datetime_columns
+    
+    return schema_info
+
+
+def _format_enhanced_schema_result_direct(rows):
+    """Format enhanced schema result for direct connections."""
+    schema_info = {}
+    datetime_columns = {}
+    
+    for row in rows:
+        table_name, column_name, data_type, max_length, precision, scale, is_nullable, type_category, formatted_type = row
+        
+        if table_name not in schema_info:
+            schema_info[table_name] = []
+            datetime_columns[table_name] = []
+        
+        nullable_info = "NULL" if is_nullable else "NOT NULL"
+        schema_info[table_name].append((column_name, f"{formatted_type} {nullable_info}"))
+        
+        if type_category == 'DATETIME_TYPE':
+            datetime_columns[table_name].append({
+                'column': column_name,
+                'type': data_type,
+                'formatted_type': formatted_type,
+                'precision': precision,
+                'scale': scale
+            })
+    
+    st.session_state['datetime_columns_info'] = datetime_columns
+    return schema_info
+
+
+def diagnose_datetime_issues():
+    """
+    Diagnostic function to identify datetime issues in the current setup.
+    """
+    st.subheader("🔍 DateTime Issues Diagnosis")
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            st.error("No database connection available for diagnosis")
+            return
+        
+        # Test 1: Check actual datetime column types
+        st.write("**Test 1: Checking Actual DateTime Column Types**")
+        try:
+            enhanced_schema = enhanced_get_schema_with_datetime_info(conn)
+            if enhanced_schema:
+                datetime_info = st.session_state.get('datetime_columns_info', {})
+                if datetime_info:
+                    for table, cols in datetime_info.items():
+                        if cols:
+                            st.write(f"Table `{table}` datetime columns:")
+                            for col in cols:
+                                st.write(f"  - {col['column']}: {col['formatted_type']}")
+                else:
+                    st.info("No datetime columns detected")
+            else:
+                st.warning("Could not retrieve enhanced schema information")
+        except Exception as e:
+            st.error(f"Enhanced schema check failed: {e}")
+        
+        # Test 2: Check sample datetime data
+        st.write("**Test 2: Sample DateTime Data**")
+        try:
+            sample_query = "SELECT TOP 3 Account_Creation_Date, Date_Last_Cust_Initiated_Activity FROM accounts_data WHERE Account_Creation_Date IS NOT NULL"
+            
+            if hasattr(conn, 'connect'):
+                with conn.connect() as test_conn:
+                    result = test_conn.execute(sample_query)
+                    rows = result.fetchall()
+                    if rows:
+                        st.write("Sample datetime values:")
+                        for i, row in enumerate(rows):
+                            st.write(f"Row {i+1}: {row[0]} | {row[1]}")
+                    else:
+                        st.info("No sample data available")
+            else:
+                cursor = conn.cursor()
+                cursor.execute(sample_query)
+                rows = cursor.fetchall()
+                cursor.close()
+                if rows:
+                    st.write("Sample datetime values:")
+                    for i, row in enumerate(rows):
+                        st.write(f"Row {i+1}: {row[0]} | {row[1]}")
+                else:
+                    st.info("No sample data available")
+                    
+        except Exception as e:
+            st.warning(f"Could not retrieve sample datetime data: {e}")
+        
+        # Test 3: Test pandas datetime parsing
+        st.write("**Test 3: Pandas DateTime Parsing Test**")
+        try:
+            test_query = "SELECT TOP 5 Account_ID, Account_Creation_Date FROM accounts_data"
+            
+            # Test without parse_dates
+            df_no_parse = pd.read_sql(test_query, conn)
+            st.write("Without parse_dates:")
+            st.write(df_no_parse.dtypes)
+            
+            # Test with parse_dates
+            df_with_parse = pd.read_sql(test_query, conn, parse_dates=['Account_Creation_Date'])
+            st.write("With parse_dates:")
+            st.write(df_with_parse.dtypes)
+            
+        except Exception as e:
+            st.warning(f"Pandas parsing test failed: {e}")
+        
+        # Test 4: Test common datetime queries
+        st.write("**Test 4: Common DateTime Query Patterns**")
+        datetime_test_queries = [
+            ("Date comparison", "SELECT COUNT(*) FROM accounts_data WHERE Account_Creation_Date >= '2020-01-01'"),
+            ("Date range", "SELECT COUNT(*) FROM accounts_data WHERE Account_Creation_Date BETWEEN '2020-01-01' AND '2024-01-01'"),
+            ("Last 30 days", "SELECT COUNT(*) FROM accounts_data WHERE Account_Creation_Date >= DATEADD(DAY, -30, GETDATE())"),
+        ]
+        
+        for test_name, query in datetime_test_queries:
+            try:
+                if hasattr(conn, 'connect'):
+                    with conn.connect() as test_conn:
+                        result = test_conn.execute(query)
+                        count = result.fetchone()[0]
+                        st.success(f"✅ {test_name}: {count} records")
+                else:
+                    cursor = conn.cursor()
+                    cursor.execute(query)
+                    count = cursor.fetchone()[0]
+                    cursor.close()
+                    st.success(f"✅ {test_name}: {count} records")
+            except Exception as e:
+                st.error(f"❌ {test_name} failed: {e}")
+                
+    except Exception as e:
+        st.error(f"Diagnosis failed: {e}")
+
+python@st.cache_data(ttl=600)  # Cache for 10 minutes instead of 1 hour
+def get_db_schema():
+    """
+    Get database schema with enhanced datetime detection and multiple fallback methods.
+    """
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            st.sidebar.warning("Cannot fetch schema: No database connection")
+            return get_fallback_schema()
+
+        # Try enhanced schema detection first
+        try:
+            enhanced_schema = enhanced_get_schema_with_datetime_info(conn)
+            if enhanced_schema:
+                st.sidebar.success(f"✅ Enhanced schema loaded: {len(enhanced_schema)} tables")
+                return enhanced_schema
+        except Exception as enhanced_error:
+            st.sidebar.warning(f"Enhanced schema failed: {str(enhanced_error)[:100]}")
+
+        # Fallback to original methods
+        schema_methods = [
+            ("sys.tables", get_schema_sys_tables),
+            ("INFORMATION_SCHEMA", get_schema_information_schema),
+            ("Direct Query", get_schema_direct_query)
+        ]
+        
+        for method_name, method_func in schema_methods:
+            try:
+                schema_info = method_func(conn)
+                if schema_info:
+                    st.sidebar.success(f"✅ Schema loaded via {method_name}: {len(schema_info)} tables")
+                    return schema_info
+            except Exception as method_error:
+                st.sidebar.warning(f"Schema method '{method_name}' failed: {str(method_error)[:100]}")
+                continue
+        
+        # If all methods fail, return fallback schema
+        st.sidebar.warning("⚠️ All schema methods failed, using fallback schema")
+        return get_fallback_schema()
+
+    except Exception as e:
+        st.sidebar.error(f"Schema fetch error: {e}")
+        return get_fallback_schema()
