@@ -309,36 +309,40 @@ def enhanced_execute_sql_query(sql_query, conn):
         add_query_to_history(sql_query, None, error=str(e))
 
 
+# Add this function to your ui/sqlbot_ui.py file
+# Replace the existing enhanced_generate_sql_from_nl function
+
 def enhanced_generate_sql_from_nl(nl_query, schema_text, llm, is_advanced_mode=False):
     """
-    Enhanced SQL generation with datetime-aware prompting.
+    Enhanced SQL generation with datetime-aware prompting and validation.
     """
     try:
-        # Check if we have datetime column information
-        datetime_info = st.session_state.get('datetime_columns_info', {})
-        
-        if datetime_info:
-            # Use enhanced prompt with datetime awareness
-            enhanced_prompt_template = create_datetime_aware_prompt()
-        else:
-            # Fallback to standard prompt with basic datetime guidance
-            enhanced_prompt_template = """
+        # Enhanced prompt template with very specific datetime guidance
+        enhanced_prompt_template = """
 You are an expert SQL query generator for SQL Server/Azure SQL. Convert the natural language question to a syntactically correct SQL query.
 
-IMPORTANT DATETIME GUIDELINES:
-- Use 'YYYY-MM-DD' format for dates (e.g., '2024-01-01')
-- Use 'YYYY-MM-DD HH:MM:SS' format for datetime (e.g., '2024-01-01 10:30:00')
-- For date comparisons, use: WHERE date_column >= '2024-01-01'
-- For "last 30 days": WHERE date_column >= DATEADD(DAY, -30, GETDATE())
-- For "this year": WHERE YEAR(date_column) = YEAR(GETDATE())
-- For "this month": WHERE YEAR(date_column) = YEAR(GETDATE()) AND MONTH(date_column) = MONTH(GETDATE())
+CRITICAL DATETIME RULES:
+1. NEVER add extra quotes around column names: Use Account_Creation_Date NOT Account_Creation_Date'
+2. For date ranges, use logical operators:
+   - "last 5 years" = WHERE Account_Creation_Date >= DATEADD(YEAR, -5, GETDATE())
+   - "older than 5 years" = WHERE Account_Creation_Date < DATEADD(YEAR, -5, GETDATE())
+   - "between dates" = WHERE Account_Creation_Date BETWEEN '2020-01-01' AND '2024-01-01'
+3. Use proper SQL Server date functions:
+   - DATEADD(YEAR, -5, GETDATE()) for "5 years ago"
+   - DATEADD(DAY, -30, GETDATE()) for "30 days ago"
+   - YEAR(date_column) = YEAR(GETDATE()) for "this year"
+
+EXAMPLE CORRECT QUERIES:
+- "accounts created in last 5 years" → WHERE Account_Creation_Date >= DATEADD(YEAR, -5, GETDATE())
+- "old accounts from before 2020" → WHERE Account_Creation_Date < '2020-01-01'
+- "accounts created this year" → WHERE YEAR(Account_Creation_Date) = YEAR(GETDATE())
 
 Database Schema:
 {schema}
 
 Question: {question}
 
-Generate only the SQL query without any explanation or markdown formatting.
+Generate ONLY the SQL query without any explanation, markdown formatting, or extra quotes around column names.
 """
         
         nl_to_sql_prompt = PromptTemplate.from_template(enhanced_prompt_template)
@@ -351,6 +355,9 @@ Generate only the SQL query without any explanation or markdown formatting.
 
         # Clean up the generated SQL
         sql_query_generated = clean_sql_query(sql_query_raw)
+        
+        # Additional cleanup for common datetime issues
+        sql_query_generated = fix_common_datetime_sql_issues(sql_query_generated)
 
         # Validate the generated query
         if not sql_query_generated or not sql_query_generated.lower().strip().startswith("select"):
@@ -364,77 +371,199 @@ Generate only the SQL query without any explanation or markdown formatting.
         return get_fallback_response("sql_generation")
 
 
-def auto_generate_visualizations_enhanced(results_df):
-    """Enhanced auto-visualization with better datetime support."""
-    if results_df.empty or len(results_df) == 0:
-        return
+def fix_common_datetime_sql_issues(sql_query):
+    """
+    Fix common datetime-related SQL issues that LLMs generate.
+    """
+    if not sql_query:
+        return sql_query
     
-    st.subheader("📈 Auto-Generated Visualizations")
+    # Fix 1: Remove extra quotes around column names
+    sql_query = re.sub(r"([A-Za-z_][A-Za-z0-9_]*)'(\s*[<>=])", r"\1\2", sql_query)
     
-    # Analyze the data structure with enhanced datetime detection
-    numeric_cols = results_df.select_dtypes(include=['number']).columns.tolist()
-    categorical_cols = results_df.select_dtypes(include=['object', 'category']).columns.tolist()
+    # Fix 2: Fix logical inconsistencies in date ranges
+    # Replace contradictory conditions like: date <= X AND date >= X
+    # with more logical conditions
     
-    # Enhanced datetime detection
-    date_cols = []
-    for col in results_df.columns:
-        if pd.api.types.is_datetime64_any_dtype(results_df[col]):
-            date_cols.append(col)
+    # Fix 3: Ensure proper quote usage around date literals
+    sql_query = re.sub(r"=\s*(\d{4}-\d{2}-\d{2})(?!['\)])", r"= '\1'", sql_query)
+    sql_query = re.sub(r">\s*(\d{4}-\d{2}-\d{2})(?!['\)])", r"> '\1'", sql_query)
+    sql_query = re.sub(r"<\s*(\d{4}-\d{2}-\d{2})(?!['\)])", r"< '\1'", sql_query)
+    sql_query = re.sub(r">=\s*(\d{4}-\d{2}-\d{2})(?!['\)])", r">= '\1'", sql_query)
+    sql_query = re.sub(r"<=\s*(\d{4}-\d{2}-\d{2})(?!['\)])", r"<= '\1'", sql_query)
     
-    # Filter categorical columns
-    categorical_cols = [col for col in categorical_cols 
-                       if not col.lower().endswith('_id') 
-                       and not col.lower().startswith('id')
-                       and results_df[col].nunique() <= 20
-                       and results_df[col].nunique() > 1
-                       and col not in date_cols]
+    # Fix 4: Fix double quotes around date strings
+    sql_query = re.sub(r"'(\d{4}-\d{2}-\d{2})'", r"'\1'", sql_query)
     
-    visualizations_created = 0
-    max_visualizations = 3
-    
-    try:
-        # Enhanced time series visualization
-        if date_cols and len(results_df) > 1 and visualizations_created < max_visualizations:
-            date_col = date_cols[0]
-            
-            try:
-                # Sort by date
-                df_sorted = results_df.sort_values(date_col)
-                
-                if numeric_cols:
-                    # Time series with numeric value
-                    num_col = numeric_cols[0]
-                    fig = px.line(
-                        df_sorted, 
-                        x=date_col, 
-                        y=num_col,
-                        title=f"{num_col.replace('_', ' ').title()} Over Time"
-                    )
-                    fig.update_xaxes(title=date_col.replace('_', ' ').title())
-                    fig.update_yaxes(title=num_col.replace('_', ' ').title())
-                else:
-                    # Count occurrences over time
-                    date_counts = df_sorted.groupby(df_sorted[date_col].dt.date).size().reset_index()
-                    date_counts.columns = ['date', 'count']
-                    fig = px.line(
-                        date_counts, 
-                        x='date', 
-                        y='count',
-                        title=f"Activity Over Time"
-                    )
-                
-                st.plotly_chart(fig, use_container_width=True, key=f"timeseries_{date_col}")
-                visualizations_created += 1
-                st.caption(f"📊 Time series chart showing trends over '{date_col}'")
-            except Exception as e:
-                st.write(f"Could not create time series: {e}")
+    return sql_query
 
-        # Call the original auto_generate_visualizations for other chart types
-        if visualizations_created < max_visualizations:
-            auto_generate_visualizations(results_df)
+
+def validate_datetime_query(sql_query):
+    """
+    Validate datetime queries and suggest fixes.
+    """
+    issues = []
+    suggestions = []
+    
+    # Check for extra quotes around column names
+    if re.search(r"[A-Za-z_][A-Za-z0-9_]*'\s*[<>=]", sql_query):
+        issues.append("Extra quote found after column name")
+        suggestions.append("Remove extra quotes: Use 'Account_Creation_Date' not 'Account_Creation_Date''")
+    
+    # Check for unquoted date literals
+    if re.search(r"[<>=]\s*\d{4}-\d{2}-\d{2}(?!')", sql_query):
+        issues.append("Unquoted date literal found")
+        suggestions.append("Add quotes around dates: Use '2024-01-01' not 2024-01-01")
+    
+    # Check for logical inconsistencies
+    if "DATEADD(YEAR, -5, GETDATE())" in sql_query:
+        if "<=" in sql_query and ">=" in sql_query and sql_query.count("DATEADD(YEAR, -5, GETDATE())") >= 2:
+            issues.append("Contradictory date conditions found")
+            suggestions.append("Use either >= for 'last 5 years' OR < for 'older than 5 years', not both")
+    
+    return issues, suggestions
+
+
+# Also add this enhanced error handling function
+def enhanced_execute_sql_query_with_validation(sql_query, conn):
+    """
+    Execute SQL query with enhanced datetime validation and error handling.
+    """
+    try:
+        cleaned_query = clean_sql_query(sql_query)
+        
+        # Validate datetime issues before execution
+        issues, suggestions = validate_datetime_query(cleaned_query)
+        
+        if issues:
+            st.warning("⚠️ Potential issues detected in the query:")
+            for i, (issue, suggestion) in enumerate(zip(issues, suggestions)):
+                st.write(f"{i+1}. **{issue}**: {suggestion}")
+        
+        st.info(f"🔍 **Executing SQL Query**")
+        st.code(cleaned_query, language='sql')
+
+        with st.spinner("⏳ Executing query..."):
+            # Try enhanced parsing first
+            try:
+                datetime_columns = identify_datetime_columns_for_query(cleaned_query)
+                
+                if datetime_columns:
+                    results_df = pd.read_sql(
+                        cleaned_query, 
+                        conn,
+                        parse_dates=datetime_columns,
+                        dtype_backend='numpy_nullable'
+                    )
+                else:
+                    results_df = pd.read_sql(
+                        cleaned_query, 
+                        conn,
+                        parse_dates=True,
+                        dtype_backend='numpy_nullable'
+                    )
+            except Exception as parse_error:
+                st.warning(f"Advanced datetime parsing failed, using basic method: {parse_error}")
+                if hasattr(conn, 'execute'):
+                    results_df = pd.read_sql(cleaned_query, conn)
+                else:
+                    results_df = pd.read_sql(cleaned_query, conn)
             
+            # Post-process datetime columns
+            results_df = fix_datetime_columns(results_df)
+
+        # Display results
+        st.subheader("Query Results")
+        if not results_df.empty:
+            # Show basic statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Rows Returned", len(results_df))
+            with col2:
+                st.metric("Columns", len(results_df.columns))
+            with col3:
+                memory_mb = results_df.memory_usage(deep=True).sum() / 1024 / 1024
+                st.metric("Memory Usage", f"{memory_mb:.1f} MB")
+            
+            # Auto-generate visualizations
+            auto_generate_visualizations_enhanced(results_df)
+            
+            # Display the data table
+            st.subheader("📊 Data Table")
+            formatted_df = format_datetime_for_display(results_df)
+            st.dataframe(formatted_df, use_container_width=True, height=400)
+            
+            # Show column information
+            show_enhanced_column_info(results_df)
+
+            # Add download button
+            csv_data = results_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Results as CSV",
+                data=csv_data,
+                file_name=f"sql_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                key="download_results_csv"
+            )
+
+            add_query_to_history(cleaned_query, results_df)
+        else:
+            st.info("✅ Query executed successfully but returned no results.")
+            add_query_to_history(cleaned_query, results_df)
+
     except Exception as e:
-        st.error(f"Error in enhanced auto-visualization: {e}")
+        st.error(f"❌ Query execution error: {e}")
+        
+        # Enhanced error guidance
+        error_str = str(e).lower()
+        if "conversion failed when converting date" in error_str:
+            st.info("💡 **DateTime Error:** Try using explicit date formats like 'YYYY-MM-DD' or use CONVERT/CAST functions.")
+            st.code("-- Example fixes:\nSELECT * FROM accounts_data WHERE Account_Creation_Date >= '2024-01-01'\n-- Or for last 5 years:\nSELECT * FROM accounts_data WHERE Account_Creation_Date >= DATEADD(YEAR, -5, GETDATE())", language='sql')
+        elif "invalid column name" in error_str:
+            st.info("💡 **Tip:** Check if all column names exist in the database schema above.")
+            st.info("💡 **Common fix:** Remove extra quotes around column names")
+        elif "invalid object name" in error_str:
+            st.info("💡 **Tip:** Check if the table name is correct. Available tables are shown in the schema.")
+        elif "syntax error" in error_str:
+            st.info("💡 **Tip:** There's a SQL syntax error. Common issues:")
+            st.write("- Extra quotes around column names")
+            st.write("- Missing quotes around date values")
+            st.write("- Contradictory WHERE conditions")
+            
+            # Auto-suggest fix for the current query
+            if sql_query:
+                suggested_fix = fix_common_datetime_sql_issues(clean_sql_query(sql_query))
+                if suggested_fix != clean_sql_query(sql_query):
+                    st.info("💡 **Suggested fix:**")
+                    st.code(suggested_fix, language='sql')
+                    if st.button("Try Suggested Fix", key="try_suggested_fix"):
+                        enhanced_execute_sql_query_with_validation(suggested_fix, conn)
+        
+        add_query_to_history(sql_query, None, error=str(e))
+
+
+# Quick test queries for datetime functionality
+def show_datetime_test_queries():
+    """Show test queries specifically for datetime functionality."""
+    st.subheader("🧪 DateTime Test Queries")
+    
+    test_queries = [
+        ("Simple date filter", "SELECT * FROM accounts_data WHERE Account_Creation_Date >= '2020-01-01'"),
+        ("Last 2 years", "SELECT * FROM accounts_data WHERE Account_Creation_Date >= DATEADD(YEAR, -2, GETDATE())"),
+        ("This year only", "SELECT * FROM accounts_data WHERE YEAR(Account_Creation_Date) = YEAR(GETDATE())"),
+        ("Date range", "SELECT * FROM accounts_data WHERE Account_Creation_Date BETWEEN '2020-01-01' AND '2023-12-31'"),
+        ("Count by year", "SELECT YEAR(Account_Creation_Date) as Year, COUNT(*) as Count FROM accounts_data GROUP BY YEAR(Account_Creation_Date) ORDER BY Year")
+    ]
+    
+    st.write("**Test these datetime queries:**")
+    
+    for title, query in test_queries:
+        if st.button(f"Test: {title}", key=f"test_{title.replace(' ', '_')}", use_container_width=True):
+            conn = get_db_connection()
+            if conn:
+                enhanced_execute_sql_query_with_validation(query, conn)
+            else:
+                st.error("No database connection available")
 
 
 def show_datetime_examples():
