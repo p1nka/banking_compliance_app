@@ -14,7 +14,7 @@ from database.schema import get_db_schema, get_datetime_columns_info, is_datetim
 from ai.llm import load_llm  # This is the correct function name in your ai/llm.py
 from langchain.prompts import PromptTemplate
 from langchain.schema.output_parser import StrOutputParser
-
+from ai.visualization import generate_plot, create_insights_chart
 
 def init_sql_bot_session_state():
     """Initialize session state variables for SQL Bot."""
@@ -329,7 +329,7 @@ def show_enhanced_column_info(df: pd.DataFrame):
 
 def enhanced_execute_sql_query(sql_query: str, conn):
     """
-    Enhanced SQL query execution with better datetime handling.
+    Enhanced SQL query execution with better datetime handling and visualization.py integration.
     This replaces the original execute_sql_query function.
     """
     try:
@@ -381,7 +381,7 @@ def enhanced_execute_sql_query(sql_query: str, conn):
                 memory_mb = results_df.memory_usage(deep=True).sum() / 1024 / 1024
                 st.metric("Memory Usage", f"{memory_mb:.1f} MB")
 
-            # Enhanced auto-generate visualizations
+            # Enhanced auto-generate visualizations using visualization.py
             auto_generate_visualizations_enhanced(results_df)
 
             # Display the data table with better datetime formatting
@@ -430,167 +430,209 @@ def enhanced_execute_sql_query(sql_query: str, conn):
 
 def auto_generate_visualizations_enhanced(results_df: pd.DataFrame):
     """
-    Enhanced auto-visualization with better datetime support.
+    Enhanced auto-visualization using functions from visualization.py
     """
-    if results_df.empty or len(results_df) == 0:
+    if results_df is None or results_df.empty or len(results_df) == 0:
+        st.info("💡 No data available for visualization.")
         return
 
-    st.subheader("📈 Auto-Generated Visualizations")
-
-    # Analyze the data structure with enhanced datetime detection
-    numeric_cols = results_df.select_dtypes(include=['number']).columns.tolist()
-    categorical_cols = results_df.select_dtypes(include=['object', 'category']).columns.tolist()
-
-    # Enhanced datetime detection
-    date_cols = []
-    for col in results_df.columns:
-        if pd.api.types.is_datetime64_any_dtype(results_df[col]):
-            date_cols.append(col)
-
-    # Filter categorical columns (exclude ID columns and columns with too many unique values)
-    categorical_cols = [col for col in categorical_cols
-                        if not col.lower().endswith('_id')
-                        and not col.lower().startswith('id')
-                        and results_df[col].nunique() <= 20
-                        and results_df[col].nunique() > 1
-                        and col not in date_cols]
-
-    visualizations_created = 0
-    max_visualizations = 4
-
     try:
-        # Enhanced time series visualization
-        if date_cols and len(results_df) > 1 and visualizations_created < max_visualizations:
-            date_col = date_cols[0]
+        st.subheader("📈 Auto-Generated Visualizations")
 
+        # Analyze the data structure
+        numeric_cols = results_df.select_dtypes(include=['number']).columns.tolist()
+        categorical_cols = results_df.select_dtypes(include=['object', 'category']).columns.tolist()
+        date_cols = []
+        
+        # Enhanced datetime detection
+        for col in results_df.columns:
+            if pd.api.types.is_datetime64_any_dtype(results_df[col]):
+                date_cols.append(col)
+
+        # Filter categorical columns (exclude ID columns and columns with too many unique values)
+        categorical_cols = [col for col in categorical_cols
+                            if not col.lower().endswith('_id')
+                            and not col.lower().startswith('id')
+                            and results_df[col].nunique() <= 20
+                            and results_df[col].nunique() > 1
+                            and col not in date_cols]
+
+        visualizations_created = 0
+        max_visualizations = 4
+
+        # 1. Pie chart for categorical data (if suitable)
+        if categorical_cols and visualizations_created < max_visualizations:
+            cat_col = categorical_cols[0]
+            unique_count = results_df[cat_col].nunique()
+            
+            if unique_count <= 10:  # Suitable for pie chart
+                try:
+                    chart = create_insights_chart(
+                        data=results_df,
+                        labels=cat_col,
+                        chart_type='pie',
+                        title=f"Distribution of {cat_col.replace('_', ' ').title()}"
+                    )
+                    
+                    if chart:
+                        st.plotly_chart(chart, use_container_width=True, key=f"pie_{cat_col}")
+                        visualizations_created += 1
+                        st.caption(f"📊 Pie chart showing distribution of '{cat_col.replace('_', ' ')}'")
+                except Exception as e:
+                    st.warning(f"Could not create pie chart: {str(e)}")
+
+        # 2. Bar chart for categorical data
+        if categorical_cols and visualizations_created < max_visualizations:
+            cat_col = categorical_cols[0] if visualizations_created == 0 else (
+                categorical_cols[1] if len(categorical_cols) > 1 else categorical_cols[0]
+            )
+            
             try:
-                # Sort by date
-                df_sorted = results_df.sort_values(date_col)
+                chart = create_insights_chart(
+                    data=results_df,
+                    labels=cat_col,
+                    chart_type='bar',
+                    title=f"Count by {cat_col.replace('_', ' ').title()}"
+                )
+                
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True, key=f"bar_{cat_col}")
+                    visualizations_created += 1
+                    st.caption(f"📊 Bar chart showing counts for '{cat_col.replace('_', ' ')}'")
+            except Exception as e:
+                st.warning(f"Could not create bar chart: {str(e)}")
 
+        # 3. Histogram for numeric data
+        if numeric_cols and visualizations_created < max_visualizations:
+            num_col = numeric_cols[0]
+            
+            try:
+                chart = create_insights_chart(
+                    data=results_df,
+                    labels=num_col,
+                    chart_type='histogram',
+                    title=f"Distribution of {num_col.replace('_', ' ').title()}"
+                )
+                
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True, key=f"histogram_{num_col}")
+                    visualizations_created += 1
+                    st.caption(f"📊 Histogram showing distribution of '{num_col.replace('_', ' ')}'")
+            except Exception as e:
+                st.warning(f"Could not create histogram: {str(e)}")
+
+        # 4. Scatter plot for two numeric columns
+        if len(numeric_cols) >= 2 and visualizations_created < max_visualizations:
+            x_col = numeric_cols[0]
+            y_col = numeric_cols[1]
+            
+            try:
+                # Create LLM output format for generate_plot function
+                plot_spec = {
+                    "plot_type": "scatter",
+                    "x_column": x_col,
+                    "y_column": y_col,
+                    "color_column": None,
+                    "names_column": None,
+                    "title": f"{x_col.replace('_', ' ').title()} vs {y_col.replace('_', ' ').title()}"
+                }
+                
+                chart, response_text = generate_plot(plot_spec, results_df)
+                
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True, key=f"scatter_{x_col}_{y_col}")
+                    visualizations_created += 1
+                    st.caption(f"📊 {response_text}")
+            except Exception as e:
+                st.warning(f"Could not create scatter plot: {str(e)}")
+
+        # 5. Box plot for numeric data with categorical grouping
+        if numeric_cols and categorical_cols and visualizations_created < max_visualizations:
+            num_col = numeric_cols[0]
+            cat_col = categorical_cols[0]
+            
+            # Only create box plot if categorical column has reasonable number of categories
+            if results_df[cat_col].nunique() <= 10:
+                try:
+                    plot_spec = {
+                        "plot_type": "box",
+                        "x_column": cat_col,
+                        "y_column": num_col,
+                        "color_column": None,
+                        "names_column": None,
+                        "title": f"{num_col.replace('_', ' ').title()} by {cat_col.replace('_', ' ').title()}"
+                    }
+                    
+                    chart, response_text = generate_plot(plot_spec, results_df)
+                    
+                    if chart:
+                        st.plotly_chart(chart, use_container_width=True, key=f"box_{num_col}_{cat_col}")
+                        visualizations_created += 1
+                        st.caption(f"📊 {response_text}")
+                except Exception as e:
+                    st.warning(f"Could not create box plot: {str(e)}")
+
+        # 6. Time series visualization for datetime columns
+        if date_cols and visualizations_created < max_visualizations:
+            date_col = date_cols[0]
+            
+            try:
                 if numeric_cols:
                     # Time series with numeric value
                     num_col = numeric_cols[0]
-                    fig = px.line(
-                        df_sorted,
-                        x=date_col,
-                        y=num_col,
-                        title=f"{num_col.replace('_', ' ').title()} Over Time",
-                        markers=True
-                    )
-                    fig.update_xaxes(title=date_col.replace('_', ' ').title())
-                    fig.update_yaxes(title=num_col.replace('_', ' ').title())
-                    fig.update_layout(hovermode='x unified')
+                    plot_spec = {
+                        "plot_type": "scatter",
+                        "x_column": date_col,
+                        "y_column": num_col,
+                        "color_column": None,
+                        "names_column": None,
+                        "title": f"{num_col.replace('_', ' ').title()} Over Time"
+                    }
+                    
+                    chart, response_text = generate_plot(plot_spec, results_df)
+                    
+                    if chart:
+                        # Convert scatter to line for time series
+                        chart.update_traces(mode='lines+markers')
+                        st.plotly_chart(chart, use_container_width=True, key=f"timeseries_{date_col}_{num_col}")
+                        visualizations_created += 1
+                        st.caption(f"📊 Time series: {response_text}")
                 else:
-                    # Count occurrences over time
-                    if pd.api.types.is_datetime64_any_dtype(df_sorted[date_col]):
-                        date_counts = df_sorted.groupby(df_sorted[date_col].dt.date).size().reset_index()
-                        date_counts.columns = ['date', 'count']
-                        fig = px.line(
-                            date_counts,
-                            x='date',
-                            y='count',
-                            title=f"Activity Count Over Time",
-                            markers=True
-                        )
-                    else:
-                        # Fallback for non-datetime columns
-                        date_counts = df_sorted[date_col].value_counts().sort_index().reset_index()
-                        date_counts.columns = ['date', 'count']
-                        fig = px.bar(
-                            date_counts,
-                            x='date',
-                            y='count',
-                            title=f"Distribution by {date_col.replace('_', ' ').title()}"
-                        )
-
-                st.plotly_chart(fig, use_container_width=True, key=f"timeseries_{date_col}")
-                visualizations_created += 1
-                st.caption(f"📊 Time series chart showing trends over '{date_col.replace('_', ' ')}'")
-            except Exception as e:
-                st.write(f"Could not create time series: {e}")
-
-        # Distribution chart for categorical data
-        if categorical_cols and visualizations_created < max_visualizations:
-            cat_col = categorical_cols[0]
-            try:
-                # Get value counts
-                cat_counts = results_df[cat_col].value_counts().reset_index()
-                cat_counts.columns = [cat_col, 'count']
-
-                if len(cat_counts) <= 10:  # Use pie chart for smaller categories
-                    fig = px.pie(
-                        cat_counts,
+                    # Count occurrences over time using bar chart
+                    date_counts = results_df.groupby(results_df[date_col].dt.date).size().reset_index()
+                    date_counts.columns = [date_col, 'count']
+                    
+                    chart = create_insights_chart(
+                        data=date_counts,
+                        labels=date_col,
                         values='count',
-                        names=cat_col,
-                        title=f"Distribution of {cat_col.replace('_', ' ').title()}"
+                        chart_type='bar',
+                        title=f"Activity Count Over Time"
                     )
-                else:  # Use bar chart for larger categories
-                    fig = px.bar(
-                        cat_counts.head(10),
-                        x=cat_col,
-                        y='count',
-                        title=f"Top 10 {cat_col.replace('_', ' ').title()} Distribution"
-                    )
-                    fig.update_xaxes(tickangle=45)
-
-                st.plotly_chart(fig, use_container_width=True, key=f"distribution_{cat_col}")
-                visualizations_created += 1
-                st.caption(f"📊 Distribution chart for '{cat_col.replace('_', ' ')}'")
+                    
+                    if chart:
+                        st.plotly_chart(chart, use_container_width=True, key=f"timeseries_count_{date_col}")
+                        visualizations_created += 1
+                        st.caption(f"📊 Time series showing activity count over '{date_col.replace('_', ' ')}'")
             except Exception as e:
-                st.write(f"Could not create distribution chart: {e}")
-
-        # Correlation heatmap for numeric data
-        if len(numeric_cols) >= 2 and visualizations_created < max_visualizations:
-            try:
-                numeric_df = results_df[numeric_cols]
-                correlation_matrix = numeric_df.corr()
-
-                fig = px.imshow(
-                    correlation_matrix,
-                    title="Correlation Matrix of Numeric Columns",
-                    color_continuous_scale='RdBu',
-                    aspect='auto'
-                )
-
-                st.plotly_chart(fig, use_container_width=True, key="correlation_heatmap")
-                visualizations_created += 1
-                st.caption("📊 Correlation matrix showing relationships between numeric columns")
-            except Exception as e:
-                st.write(f"Could not create correlation matrix: {e}")
+                st.warning(f"Could not create time series visualization: {str(e)}")
 
         # Summary statistics for numeric columns
-        if numeric_cols and visualizations_created < max_visualizations:
+        if numeric_cols:
             try:
-                # Box plot for numeric distributions
-                if len(numeric_cols) == 1:
-                    fig = px.box(
-                        results_df,
-                        y=numeric_cols[0],
-                        title=f"Distribution of {numeric_cols[0].replace('_', ' ').title()}"
-                    )
-                else:
-                    # Multiple box plots
-                    melted_df = pd.melt(results_df[numeric_cols], var_name='Column', value_name='Value')
-                    fig = px.box(
-                        melted_df,
-                        x='Column',
-                        y='Value',
-                        title="Distribution of Numeric Columns"
-                    )
-                    fig.update_xaxes(tickangle=45)
-
-                st.plotly_chart(fig, use_container_width=True, key="numeric_distribution")
-                visualizations_created += 1
-                st.caption("📊 Box plot showing distribution and outliers in numeric data")
+                st.subheader("📊 Summary Statistics")
+                summary_stats = results_df[numeric_cols].describe()
+                st.dataframe(summary_stats, use_container_width=True)
             except Exception as e:
-                st.write(f"Could not create box plot: {e}")
+                st.warning(f"Could not create summary statistics: {str(e)}")
 
         if visualizations_created == 0:
             st.info(
-                "💡 No suitable columns found for automatic visualization. Try queries that return numeric data, dates, or categorical data.")
+                "💡 No suitable columns found for automatic visualization. Try queries that return numeric data, dates, or categorical data with reasonable cardinality.")
 
     except Exception as e:
-        st.error(f"Error in auto-visualization: {e}")
+        st.error(f"❌ Error in auto-visualization: {str(e)}")
+        st.info("💡 You can still view your data in the table below.")
 
 
 def show_datetime_examples():
