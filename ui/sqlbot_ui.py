@@ -173,10 +173,6 @@ def generate_sql_from_nl(nl_query, schema_text, llm, is_advanced_mode=False):
     return enhanced_generate_sql_from_nl(nl_query, schema_text, llm, is_advanced_mode)
     
 
-    except Exception as e:
-        st.error(f"SQL generation error: {e}")
-        return get_fallback_response("sql_generation")
-
 
 def execute_sql_query(sql_query, conn):
     """Execute SQL query with enhanced datetime handling."""
