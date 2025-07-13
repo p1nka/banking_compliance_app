@@ -86,7 +86,7 @@ class AgentDatabasePipeline:
         query = """
                 SELECT * \
                 FROM accounts_data
-                WHERE DATEDIFF(day, Date_Last_Cust_Initiated_Activity, GETDATE()) >= ?
+                WHERE DATEDIFF(day, Date_Last_Cust_Initiated_Activity, GETDATE()) >= %s
                 ORDER BY Date_Last_Cust_Initiated_Activity ASC \
                 """
         return self.execute_query(query, (days_threshold,))
@@ -94,7 +94,7 @@ class AgentDatabasePipeline:
     def get_compliance_flags(self, account_id=None):
         """Get compliance flags for all accounts or a specific account."""
         if account_id:
-            query = "SELECT * FROM dormant_flags WHERE account_id = ? ORDER BY timestamp DESC"
+            query = "SELECT * FROM dormant_flags WHERE account_id = %s ORDER BY timestamp DESC"
             return self.execute_query(query, (account_id,))
         else:
             query = "SELECT * FROM dormant_flags ORDER BY timestamp DESC"
@@ -103,7 +103,7 @@ class AgentDatabasePipeline:
     def get_ledger_entries(self, account_id=None):
         """Get ledger entries for all accounts or a specific account."""
         if account_id:
-            query = "SELECT * FROM dormant_ledger WHERE account_id = ? ORDER BY timestamp DESC"
+            query = "SELECT * FROM dormant_ledger WHERE account_id = %s ORDER BY timestamp DESC"
             return self.execute_query(query, (account_id,))
         else:
             query = "SELECT * FROM dormant_ledger ORDER BY timestamp DESC"
@@ -204,7 +204,7 @@ class OutputStoragePipeline:
             query = """
                     INSERT INTO analysis_results
                     (analysis_type, analysis_name, result_data, result_summary, record_count, created_by, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) \
+                    VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP) \
                     """
 
             cursor = self.conn.cursor()
@@ -237,19 +237,19 @@ class OutputStoragePipeline:
 
             if analysis_type:
                 query = """
-                        SELECT TOP ? id, analysis_type, \
+                        SELECT TOP %s id, analysis_type, \
                                analysis_name, \
                                result_summary,
                                record_count, \
                                created_by, timestamp
                         FROM analysis_results
-                        WHERE analysis_type = ?
+                        WHERE analysis_type = %s
                         ORDER BY timestamp DESC \
                         """
                 return self.execute_query(query, (limit, analysis_type))
             else:
                 query = """
-                        SELECT TOP ? id, analysis_type, \
+                        SELECT TOP %s id, analysis_type, \
                                analysis_name, \
                                result_summary,
                                record_count, \
@@ -283,7 +283,7 @@ class OutputStoragePipeline:
         try:
             query = """
                     INSERT INTO insight_log (timestamp, observation, trend, insight, action)
-                    VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?) \
+                    VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s) \
                     """
 
             cursor = self.conn.cursor()
@@ -312,7 +312,7 @@ class OutputStoragePipeline:
             query = """
                     INSERT INTO dormant_flags
                     (account_id, flag_instruction, flag_reason, flag_days, flagged_by, timestamp)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) \
+                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP) \
                     """
 
             cursor = self.conn.cursor()
@@ -336,7 +336,7 @@ class OutputStoragePipeline:
             query = """
                     INSERT INTO dormant_ledger
                     (account_id, classification, classification_reason, classified_by, timestamp)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) \
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP) \
                     """
 
             cursor = self.conn.cursor()

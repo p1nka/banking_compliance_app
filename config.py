@@ -22,7 +22,7 @@ DB_DRIVER = os.getenv("DB_DRIVER", "{ODBC Driver 18 for SQL Server}")
 # AI Model configuration
 AI_MODEL_PROVIDER = os.getenv("AI_MODEL_PROVIDER", "groq")
 AI_MODEL_NAME = os.getenv("AI_MODEL_NAME", "llama3.3-70b-versatile")
-AI_API_KEY = os.getenv("AI_API_KEY", "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")
+AI_API_KEY = os.getenv("AI_API_KEY", "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")
 
 # Application configuration
 APP_NAME = "Banking Compliance Assistant"
@@ -36,8 +36,7 @@ This Bot helps identify dormant accounts and analyze compliance requirements
 according to Central Bank of UAE regulations.
 """
 
-import streamlit as st
-from datetime import datetime
+
 
 # Feature flags
 ENABLE_AI_FEATURES = os.getenv("ENABLE_AI_FEATURES", "true").lower() == "true"
@@ -61,7 +60,7 @@ SESSION_COLUMN_MAPPING = "column_mapping"    # Mapping of standardized to origin
 
 # Database configuration
 # Try to get from environment variables or use defaults
-DB_SERVER = os.environ.get("DB_SERVER", "agentdb123.database.windows.net")
+DB_SERVER = os.environ.get("DB_SERVER", "agentdb456.database.windows.net")
 DB_NAME = os.environ.get("DB_NAME", "compliance_db")
 DB_PORT = os.environ.get("DB_PORT", "1433")  # Default for SQL Server
 

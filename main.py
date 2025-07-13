@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 import os
 import hashlib
 import hmac
+import pyodbc
+
 
 import ui
 from database.connection import maintain_connection, wakeup_connection, perform_keepalive
@@ -142,7 +144,7 @@ if check_password():
     from ui.dormant_ui import render_dormant_analyzer
     from ui.compliance_ui import render_compliance_analyzer
     from ui.sqlbot_ui import render_sqlbot
-    from ai.chatbot import display_chat_interface as render_chatbot
+    from ui.chatbot_ui import render_chatbot
 
     # Import AI model
     from ai.llm import load_llm
@@ -224,7 +226,7 @@ if check_password():
         elif app_mode == "🔒 Dormant Compliance Analyzer":
             ui.compliance_ui.render_compliance_analyzer(df,agent_name_input, llm)
         elif app_mode == "💬 Chatbot Only":
-            render_chatbot(df, llm)
+            render_chatbot(llm)
         elif app_mode == "🔍 SQL Bot":
             render_sqlbot(llm)
 

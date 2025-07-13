@@ -5,7 +5,7 @@ import json
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from config import SESSION_CHAT_MESSAGES, SESSION_COLUMN_MAPPING
-from ai.llm import generate_sql
+from ui.sqlbot_ui import render_sqlbot
 
 
 def get_response_and_chart(user_query, current_data, llm_model):

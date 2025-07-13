@@ -1,1270 +1,761 @@
 import streamlit as st
 import pandas as pd
 import re
-import json
-import pyodbc
 from typing import Dict, Any, Optional, Tuple, List
-from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-from langchain.agents import create_structured_chat_agent, AgentExecutor
-from langchain.tools import Tool
-from langchain.memory import ConversationBufferWindowMemory
-from langchain.schema import AgentAction, AgentFinish
-from config import SESSION_CHAT_MESSAGES, SESSION_COLUMN_MAPPING
-from ai.llm import generate_sql
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from config import SESSION_CHAT_MESSAGES, SESSION_APP_DF, SESSION_DATA_PROCESSED
 from database.connection import get_db_connection
-from database.schema import get_db_schema
+from database.schema import get_db_schema, get_datetime_columns_info
 from database.operations import save_sql_query_to_history
-import plotly.express as px
-import plotly.graph_objects as go
+from ai.visualizations import auto_visualize
 import numpy as np
 from datetime import datetime
+import logging
+import sqlite3
+import tempfile
+import os
+
+# Set up logging for better debugging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class UploadedDataAnalyzer:
+    """Handles analysis of uploaded CSV/Excel data stored in session state."""
+
+    def __init__(self):
+        self.data_df = None
+        self.schema_info = None
+        self.datetime_info = None
+        self.temp_db_path = None
+        self.initialize_uploaded_data()
+
+    def initialize_uploaded_data(self):
+        """Initialize uploaded data from session state."""
+        try:
+            if SESSION_APP_DF in st.session_state and st.session_state[SESSION_APP_DF] is not None:
+                self.data_df = st.session_state[SESSION_APP_DF].copy()
+                self.schema_info = self._create_schema_from_dataframe()
+                self.datetime_info = self._detect_datetime_columns()
+                logger.info(f"Uploaded data initialized: {len(self.data_df)} rows, {len(self.data_df.columns)} columns")
+            else:
+                logger.info("No uploaded data found in session state")
+        except Exception as e:
+            logger.error(f"Failed to initialize uploaded data: {str(e)}")
+            self.data_df = None
+
+    def _create_schema_from_dataframe(self) -> Dict[str, List[Tuple[str, str]]]:
+        """Create schema information from DataFrame."""
+        if self.data_df is None or self.data_df.empty:
+            return {}
+
+        schema = {"uploaded_data": []}
+
+        for col in self.data_df.columns:
+            dtype = str(self.data_df[col].dtype)
+
+            # Map pandas dtypes to SQL-like types
+            if 'int' in dtype:
+                sql_type = 'INTEGER'
+            elif 'float' in dtype:
+                sql_type = 'DECIMAL'
+            elif 'datetime' in dtype:
+                sql_type = 'DATETIME'
+            elif 'bool' in dtype:
+                sql_type = 'BOOLEAN'
+            else:
+                sql_type = 'VARCHAR'
+
+            schema["uploaded_data"].append((col, sql_type))
+
+        return schema
+
+    def _detect_datetime_columns(self) -> Dict[str, List[Dict]]:
+        """Detect datetime columns in the DataFrame."""
+        if self.data_df is None:
+            return {}
+
+        datetime_cols = []
+        for col in self.data_df.columns:
+            if pd.api.types.is_datetime64_any_dtype(self.data_df[col]):
+                datetime_cols.append({
+                    'column': col,
+                    'type': 'datetime64',
+                    'formatted_type': 'DATETIME'
+                })
+            elif col.lower().find('date') != -1:
+                # Check if it looks like a date column
+                sample_values = self.data_df[col].dropna().head(5)
+                if not sample_values.empty:
+                    try:
+                        pd.to_datetime(sample_values.iloc[0])
+                        datetime_cols.append({
+                            'column': col,
+                            'type': 'date_string',
+                            'formatted_type': 'DATE'
+                        })
+                    except:
+                        pass
+
+        return {"uploaded_data": datetime_cols} if datetime_cols else {}
+
+    def execute_pandas_query(self, query: str) -> pd.DataFrame:
+        """Execute a pandas-based query on uploaded data."""
+        if self.data_df is None or self.data_df.empty:
+            raise Exception("No uploaded data available")
+
+        # Create a temporary SQLite database in memory
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp_file:
+            self.temp_db_path = tmp_file.name
+
+        try:
+            # Connect to SQLite and load data
+            conn = sqlite3.connect(self.temp_db_path)
+
+            # Write DataFrame to SQLite
+            self.data_df.to_sql('uploaded_data', conn, if_exists='replace', index=False)
+
+            # Execute the query (replace any hardcoded table names)
+            cleaned_query = self._adapt_query_for_uploaded_data(query)
+
+            with st.status("🔍 Executing Query on Uploaded Data...", state="running", expanded=True) as status:
+                st.code(cleaned_query, language='sql')
+                start_time = datetime.now()
+
+                try:
+                    results_df = pd.read_sql_query(cleaned_query, conn)
+                    execution_time = (datetime.now() - start_time).total_seconds()
+
+                    status.update(
+                        label=f"✅ Query completed in {execution_time:.2f}s, found {len(results_df)} rows.",
+                        state="complete"
+                    )
+
+                    logger.info(f"Pandas query executed successfully. Rows: {len(results_df)}")
+
+                except Exception as e:
+                    execution_time = (datetime.now() - start_time).total_seconds()
+                    status.update(
+                        label=f"❌ Query failed after {execution_time:.2f}s",
+                        state="error"
+                    )
+                    raise Exception(f"Query execution failed: {str(e)}")
+
+                finally:
+                    conn.close()
+
+            return results_df
+
+        finally:
+            # Clean up temporary database
+            if os.path.exists(self.temp_db_path):
+                try:
+                    os.unlink(self.temp_db_path)
+                except:
+                    pass
+
+    def _adapt_query_for_uploaded_data(self, query: str) -> str:
+        """
+        Adapt SQL query to work with the uploaded data table name.
+        The complex dialect translation is removed as the AI now generates SQLite-native queries.
+        """
+        # Replace common hardcoded table names with 'uploaded_data'
+        hardcoded_tables = ['accounts_data', 'final_comprehensive_data', 'customer_data', 'transactions']
+
+        adapted_query = query
+        for table_name in hardcoded_tables:
+            # Case-insensitive replacement
+            pattern = re.compile(re.escape(table_name), re.IGNORECASE)
+            adapted_query = pattern.sub('uploaded_data', adapted_query)
+
+        # FIX: Handle TOP to LIMIT conversion, as LLM might still generate TOP out of habit.
+        # This is more robust than a simple `sub` as it moves the LIMIT to the end.
+        top_match = re.search(r'SELECT\s+(?:DISTINCT\s+)?TOP\s+(\d+)', adapted_query, re.IGNORECASE)
+        if top_match:
+            limit_val = top_match.group(1)
+            # Remove the "TOP N" part from the query
+            adapted_query = re.sub(r'TOP\s+\d+', '', adapted_query, count=1, flags=re.IGNORECASE).strip()
+            # Add the "LIMIT N" clause at the end
+            if "LIMIT" not in adapted_query.upper():
+                adapted_query += f" LIMIT {limit_val}"
+
+        logger.info(f"Original query: {query}")
+        logger.info(f"Adapted query for SQLite: {adapted_query}")
+
+        return adapted_query
+
+    def get_schema_for_prompt(self) -> str:
+        """Format uploaded data schema for LLM prompt."""
+        if not self.schema_info:
+            return "No uploaded data schema available."
+
+        schema_text = "Uploaded Data Schema:\n"
+        for table_name, columns in self.schema_info.items():
+            schema_text += f"Table: {table_name}\n"
+            for column_name, column_type in columns:
+                schema_text += f"  - {column_name}: {column_type}\n"
+            schema_text += "\n"
+
+        # Add datetime column information
+        if self.datetime_info:
+            schema_text += "DateTime Columns Information:\n"
+            for table_name, datetime_cols in self.datetime_info.items():
+                if datetime_cols:
+                    schema_text += f"Table {table_name}:\n"
+                    for col_info in datetime_cols:
+                        schema_text += f"  - {col_info['column']}: {col_info['type']}\n"
+                    schema_text += "\n"
+
+        return schema_text
 
 
 class DatabaseSQLAnalyzer:
-    """Enhanced SQL analyzer using your existing database infrastructure"""
+    """Handles all direct database interactions, including connection, schema retrieval, and query execution."""
 
     def __init__(self):
         self.connection = None
         self.schema_info = None
+        self.datetime_info = None
         self.primary_table = None
         self.initialize_database()
 
     def initialize_database(self):
-        """Initialize database connection and schema"""
+        """Initializes the database connection and retrieves the schema."""
         try:
-            # Use your existing connection function
             self.connection = get_db_connection()
-
             if self.connection:
-                st.success("✅ Connected to Azure SQL Database successfully!")
-
-                # Get schema using your existing function
                 self.schema_info = get_db_schema()
-
+                self.datetime_info = get_datetime_columns_info()
                 if self.schema_info:
-                    st.success(f"✅ Database schema loaded: {len(self.schema_info)} tables found")
                     self.primary_table = self._determine_primary_table()
-
-                    # Display available tables
-                    with st.expander("📊 Available Database Tables", expanded=False):
-                        for table_name, columns in self.schema_info.items():
-                            st.write(f"**{table_name}** ({len(columns)} columns)")
-                            col_info = [f"{col[0]} ({col[1]})" for col in columns[:5]]
-                            if len(columns) > 5:
-                                col_info.append(f"... and {len(columns) - 5} more")
-                            st.write(f"   • {', '.join(col_info)}")
-                else:
-                    st.warning("⚠️ Could not load database schema")
-            else:
-                st.error("❌ Failed to connect to database")
-
+                logger.info(f"Database initialized successfully. Primary table: {self.primary_table}")
         except Exception as e:
+            logger.error(f"Database initialization failed: {str(e)}")
             st.error(f"❌ Database initialization failed: {str(e)}")
             self.connection = None
             self.schema_info = None
 
-    def _determine_primary_table(self) -> str:
-        """Determine the primary table for analysis"""
+    def _determine_primary_table(self) -> Optional[str]:
+        """Heuristically determines the most important table in the schema."""
         if not self.schema_info:
             return None
-
-        # Priority order for banking compliance tables
-        priority_tables = [
-            'accounts_data',
-            'dormant_flags',
-            'dormant_ledger',
-            'analysis_results',
-            'sql_query_history'
-        ]
-
-        # Check for preferred tables first
+        priority_tables = ['final_comprehensive_data', 'sales', 'orders', 'customers', 'transactions']
         for table in priority_tables:
             if table in self.schema_info:
                 return table
-
-        # Return the first available table
         return list(self.schema_info.keys())[0] if self.schema_info else None
 
-    def execute_sql(self, query: str, save_to_history: bool = True) -> pd.DataFrame:
-        """Execute SQL query using your database connection"""
-        try:
-            if not self.connection:
-                raise Exception("Database connection not available")
+    def execute_sql(self, query: str) -> pd.DataFrame:
+        """Executes a SQL query and returns a pandas DataFrame with robust datetime handling."""
+        if not self.connection:
+            raise Exception("Database connection not available")
 
-            # Clean and validate the query
-            cleaned_query = self._clean_and_validate_query(query)
+        cleaned_query = self._clean_and_validate_query(query)
+        logger.info(f"Executing query: {cleaned_query}")
 
-            st.info(f"🔍 **Executing SQL on Azure Database:**")
+        with st.status("🔍 Executing SQL Query...", state="running", expanded=True) as status:
             st.code(cleaned_query, language='sql')
-
-            # Execute query using pandas
             start_time = datetime.now()
-            result_df = pd.read_sql(cleaned_query, self.connection)
-            execution_time = (datetime.now() - start_time).total_seconds() * 1000
 
-            st.success(f"✅ Query completed in {execution_time:.0f}ms - Found {len(result_df)} records")
+            try:
+                # Get all datetime columns from database info
+                datetime_columns = self._get_datetime_columns_for_query(cleaned_query)
+                logger.info(f"Detected datetime columns: {datetime_columns}")
 
-            # Save to history if enabled
-            if save_to_history:
-                try:
-                    # This will use your existing save function
-                    save_sql_query_to_history("Chatbot Query", cleaned_query)
-                except Exception as e:
-                    st.warning(f"Could not save to history: {e}")
+                # Execute query with datetime parsing
+                if datetime_columns:
+                    results_df = pd.read_sql(
+                        cleaned_query,
+                        self.connection,
+                        parse_dates=datetime_columns
+                    )
+                else:
+                    results_df = pd.read_sql(cleaned_query, self.connection)
 
-            # Show preview of results
-            if not result_df.empty:
-                with st.expander("📋 Query Results Preview", expanded=False):
-                    st.dataframe(result_df.head(20), use_container_width=True)
-                    if len(result_df) > 20:
-                        st.info(f"Showing first 20 of {len(result_df)} total records")
+                # Post-process datetime columns that might have been missed
+                results_df = self._post_process_datetime_columns(results_df)
 
-            return result_df
+                execution_time = (datetime.now() - start_time).total_seconds()
+                status.update(
+                    label=f"✅ Query completed in {execution_time:.2f}s, found {len(results_df)} rows.",
+                    state="complete"
+                )
 
+                logger.info(
+                    f"Query executed successfully. Rows: {len(results_df)}, Columns: {list(results_df.columns)}")
+
+            except Exception as e:
+                execution_time = (datetime.now() - start_time).total_seconds()
+                status.update(
+                    label=f"❌ Query failed after {execution_time:.2f}s",
+                    state="error"
+                )
+                logger.error(f"SQL execution failed: {str(e)}")
+                raise Exception(f"SQL execution failed: {str(e)}")
+
+        # Save query to history
+        try:
+            save_sql_query_to_history("AI Assistant Query", cleaned_query, execution_time)
         except Exception as e:
-            error_msg = f"SQL execution error: {str(e)}"
-            st.error(f"❌ {error_msg}")
-            raise Exception(error_msg)
+            logger.warning(f"Could not save query to history: {e}")
+            st.warning(f"Could not save query to history: {e}")
+
+        return results_df
+
+    def _get_datetime_columns_for_query(self, query: str) -> List[str]:
+        """Extract datetime columns that are likely to be in the query results."""
+        datetime_columns = []
+
+        if not self.datetime_info:
+            return datetime_columns
+
+        query_lower = query.lower()
+
+        for table_name, table_datetime_cols in self.datetime_info.items():
+            for col_info in table_datetime_cols:
+                col_name = col_info['column']
+                # Check if column is referenced in the query
+                if col_name.lower() in query_lower:
+                    datetime_columns.append(col_name)
+
+        return datetime_columns
+
+    def _post_process_datetime_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Post-process DataFrame to ensure datetime columns are properly converted."""
+        if df.empty:
+            return df
+
+        for col in df.columns:
+            # Check if column contains datetime-like strings
+            if df[col].dtype == 'object' and not df[col].empty:
+                # Sample the first non-null value
+                sample_value = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
+                if sample_value and self._looks_like_datetime(str(sample_value)):
+                    try:
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
+                        logger.info(f"Converted column '{col}' to datetime")
+                    except Exception as e:
+                        logger.warning(f"Failed to convert column '{col}' to datetime: {e}")
+
+        return df
+
+    def _looks_like_datetime(self, value: str) -> bool:
+        """Check if a string value looks like a datetime."""
+        datetime_patterns = [
+            r'\d{4}-\d{2}-\d{2}',  # YYYY-MM-DD
+            r'\d{2}/\d{2}/\d{4}',  # MM/DD/YYYY
+            r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}',  # YYYY-MM-DD HH:MM:SS
+        ]
+
+        for pattern in datetime_patterns:
+            if re.search(pattern, value):
+                return True
+        return False
 
     def _clean_and_validate_query(self, query: str) -> str:
-        """Clean and validate SQL query for your database"""
-        # Remove dangerous SQL commands (using your existing approach)
+        """Basic cleaning and validation to prevent harmful SQL commands."""
+        if not query or not isinstance(query, str):
+            raise Exception("Generated query is empty or not a string.")
+
+        # Clean up the query
+        query = query.strip().rstrip(';')
+
+        # Remove markdown code blocks if present
+        query = re.sub(r'^```sql\s*|\s*```$', '', query.strip())
+        query = re.sub(r'^```\s*|\s*```$', '', query.strip())
+
+        if not query:
+            raise Exception("Query is empty after cleaning.")
+
+        # Security validation
         dangerous_keywords = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'CREATE', 'TRUNCATE', 'EXEC']
         query_upper = query.upper()
 
+        if not query_upper.strip().startswith('SELECT'):
+            raise Exception(
+                f"The AI failed to generate a valid SQL query. Query must start with SELECT. Got: {query[:100]}...")
+
         for keyword in dangerous_keywords:
             if f' {keyword} ' in f' {query_upper} ' or query_upper.startswith(f'{keyword} '):
-                raise Exception(f"Dangerous SQL keyword '{keyword}' not allowed")
+                raise Exception(f"Dangerous SQL keyword '{keyword}' is not allowed.")
 
-        # Ensure query is a SELECT statement
-        if not query_upper.strip().startswith('SELECT'):
-            raise Exception("Only SELECT statements are allowed")
+        return query
 
-        # Replace generic table references with actual table names
-        if self.primary_table and 'data_table' in query.lower():
-            query = re.sub(r'\bdata_table\b', self.primary_table, query, flags=re.IGNORECASE)
-
-        return query.strip()
-
-    def get_schema_description(self) -> str:
-        """Get comprehensive schema description for LLM context"""
+    def get_schema_for_prompt(self) -> str:
+        """Formats the database schema as a string for the LLM prompt."""
         if not self.schema_info:
-            return "No database schema available"
+            return "No database schema available."
 
-        description = []
-        description.append("AZURE SQL DATABASE SCHEMA:")
-        description.append("=" * 50)
-
+        schema_text = "Database Schema:\n"
         for table_name, columns in self.schema_info.items():
-            description.append(f"\nTABLE: {table_name}")
-            description.append("COLUMNS:")
-
-            for col_name, col_type in columns:
-                description.append(f"  - {col_name} ({col_type})")
-
-            # Add sample data context for key tables
-            if table_name == 'accounts_data':
-                description.append("  * Main banking accounts table")
-                description.append("  * Key fields: Account_ID, Customer_ID, Account_Type, Current_Balance")
-                description.append("  * Date fields for tracking dormancy and activity")
-            elif table_name == 'dormant_flags':
-                description.append("  * Dormant account flags and instructions")
-            elif table_name == 'insight_log':
-                description.append("  * Analysis insights and observations")
-
-        description.append(f"\nPRIMARY TABLE FOR ANALYSIS: {self.primary_table}")
-        description.append("\nNOTE: Use exact table and column names as shown above")
-
-        return "\n".join(description)
-
-    def get_table_row_count(self, table_name: str) -> int:
-        """Get row count for a specific table"""
-        try:
-            if not self.connection:
-                return 0
-
-            cursor = self.connection.cursor()
-            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-            count = cursor.fetchone()[0]
-            cursor.close()
-            return count
-        except:
-            return 0
-
-
-class DynamicVisualizationEngine:
-    """Enhanced visualization engine for banking compliance data"""
-
-    def __init__(self):
-        self.chart_colors = [
-            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
-            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
-        ]
-
-        # Banking-specific color schemes
-        self.banking_colors = {
-            'risk_levels': ['#28a745', '#ffc107', '#fd7e14', '#dc3545'],  # Green to Red
-            'account_types': ['#007bff', '#28a745', '#ffc107', '#dc3545', '#6f42c1'],
-            'status': ['#28a745', '#6c757d', '#dc3545']  # Active, Inactive, Closed
-        }
-
-    def analyze_and_visualize(self, query_result: pd.DataFrame, query: str, original_question: str) -> Tuple[Any, str]:
-        """Analyze SQL results and create banking-focused visualizations"""
-
-        if query_result.empty:
-            return None, "❌ Query returned no data to visualize"
-
-        st.info(f"📊 Creating banking compliance visualization for {len(query_result)} records...")
-
-        try:
-            # Analyze the result structure
-            analysis = self._analyze_banking_data_structure(query_result)
-
-            # Determine best visualization for banking data
-            chart_config = self._determine_banking_chart_type(analysis, original_question)
-
-            # Generate the chart with banking context
-            chart = self._create_banking_chart(query_result, chart_config)
-
-            if chart is None:
-                return None, "❌ Failed to create visualization"
-
-            # Generate banking-specific insights
-            insight = self._generate_banking_insights(query_result, chart_config, original_question)
-
-            st.success("✅ Banking compliance visualization created!")
-            return chart, insight
-
-        except Exception as e:
-            error_msg = f"❌ Visualization error: {str(e)}"
-            st.error(error_msg)
-            return None, error_msg
-
-    def _analyze_banking_data_structure(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Analyze banking data structure with domain knowledge"""
-        analysis = {
-            'num_rows': len(df),
-            'num_cols': len(df.columns),
-            'columns': list(df.columns),
-            'numeric_columns': [],
-            'categorical_columns': [],
-            'date_columns': [],
-            'boolean_columns': [],
-            'banking_context': {}
-        }
-
-        # Identify column types and banking context
-        for col in df.columns:
-            col_lower = col.lower()
-
-            if pd.api.types.is_numeric_dtype(df[col]):
-                analysis['numeric_columns'].append(col)
-
-                # Identify banking-specific numeric fields
-                if any(term in col_lower for term in ['balance', 'amount', 'charges']):
-                    analysis['banking_context']['financial'] = analysis['banking_context'].get('financial', []) + [col]
-                elif any(term in col_lower for term in ['count', 'total']):
-                    analysis['banking_context']['metrics'] = analysis['banking_context'].get('metrics', []) + [col]
-
-            elif pd.api.types.is_datetime64_any_dtype(df[col]):
-                analysis['date_columns'].append(col)
-
-                # Identify banking date fields
-                if any(term in col_lower for term in ['dormancy', 'maturity', 'creation', 'last_activity']):
-                    analysis['banking_context']['timeline'] = analysis['banking_context'].get('timeline', []) + [col]
-
-            elif pd.api.types.is_bool_dtype(df[col]) or df[col].dtype == 'object' and set(
-                    df[col].dropna().unique()).issubset({'Yes', 'No', 'Unknown', True, False}):
-                analysis['boolean_columns'].append(col)
-
-            else:
-                analysis['categorical_columns'].append(col)
-
-                # Identify banking categories
-                if any(term in col_lower for term in ['account_type', 'customer_type', 'status']):
-                    analysis['banking_context']['categories'] = analysis['banking_context'].get('categories', []) + [
-                        col]
-                elif any(term in col_lower for term in ['id', 'number']):
-                    analysis['banking_context']['identifiers'] = analysis['banking_context'].get('identifiers', []) + [
-                        col]
-
-        return analysis
-
-    def _determine_banking_chart_type(self, analysis: Dict[str, Any], question: str) -> Dict[str, Any]:
-        """Determine optimal chart type for banking compliance data"""
-
-        config = {
-            'chart_type': 'bar',
-            'x_column': None,
-            'y_column': None,
-            'color_column': None,
-            'names_column': None,
-            'values_column': None,
-            'title': self._generate_banking_title(question),
-            'color_scheme': 'default'
-        }
-
-        question_lower = question.lower()
-        banking_context = analysis.get('banking_context', {})
-
-        # Banking-specific chart type decisions
-        if 'dormant' in question_lower or 'compliance' in question_lower:
-            config['color_scheme'] = 'risk_levels'
-
-        elif 'account' in question_lower and 'type' in question_lower:
-            config['color_scheme'] = 'account_types'
-
-        # Standard chart type logic enhanced for banking
-        if analysis['num_cols'] == 1:
-            col = analysis['columns'][0]
-            if col in analysis['numeric_columns']:
-                config['chart_type'] = 'histogram'
-                config['x_column'] = col
-            else:
-                config['chart_type'] = 'pie'
-                config['names_column'] = col
-
-        elif analysis['num_cols'] == 2:
-            if len(analysis['categorical_columns']) == 1 and len(analysis['numeric_columns']) == 1:
-                cat_col = analysis['categorical_columns'][0]
-                num_col = analysis['numeric_columns'][0]
-
-                # Special handling for banking metrics
-                if 'balance' in num_col.lower() or 'amount' in num_col.lower():
-                    config['chart_type'] = 'bar'
-                    config['x_column'] = cat_col
-                    config['y_column'] = num_col
-                    config['color_scheme'] = 'banking'
-                elif analysis['num_rows'] <= 10:
-                    config['chart_type'] = 'pie'
-                    config['names_column'] = cat_col
-                    config['values_column'] = num_col
-                else:
-                    config['chart_type'] = 'bar'
-                    config['x_column'] = cat_col
-                    config['y_column'] = num_col
-
-            elif len(analysis['date_columns']) == 1 and len(analysis['numeric_columns']) == 1:
-                config['chart_type'] = 'line'
-                config['x_column'] = analysis['date_columns'][0]
-                config['y_column'] = analysis['numeric_columns'][0]
-
-        # Override based on banking keywords
-        if 'trend' in question_lower or 'over time' in question_lower:
-            if analysis['date_columns']:
-                config['chart_type'] = 'line'
-                config['x_column'] = analysis['date_columns'][0]
-                if analysis['numeric_columns']:
-                    config['y_column'] = analysis['numeric_columns'][0]
-
-        elif 'distribution' in question_lower and analysis['categorical_columns']:
-            config['chart_type'] = 'pie'
-            config['names_column'] = analysis['categorical_columns'][0]
-
-        return config
-
-    def _create_banking_chart(self, df: pd.DataFrame, config: Dict[str, Any]) -> Any:
-        """Create banking-focused Plotly charts"""
-
-        try:
-            chart_type = config['chart_type']
-            colors = self._get_color_scheme(config['color_scheme'])
-
-            common_params = {
-                'title': config['title'],
-                'color_discrete_sequence': colors
-            }
-
-            if chart_type == 'bar':
-                chart = px.bar(
-                    df,
-                    x=config.get('x_column'),
-                    y=config.get('y_column'),
-                    color=config.get('color_column'),
-                    **common_params
-                )
-
-                # Add value labels for banking data
-                chart.update_traces(
-                    texttemplate='%{y:,.0f}',
-                    textposition='outside',
-                    hovertemplate='<b>%{x}</b><br>Value: %{y:,.2f}<extra></extra>'
-                )
-
-            elif chart_type == 'pie':
-                if config.get('values_column'):
-                    chart = px.pie(
-                        df,
-                        names=config.get('names_column'),
-                        values=config.get('values_column'),
-                        **common_params
-                    )
-                else:
-                    names_col = config.get('names_column')
-                    if names_col and names_col in df.columns:
-                        value_counts = df[names_col].value_counts()
-                        chart = px.pie(
-                            values=value_counts.values,
-                            names=value_counts.index,
-                            **common_params
-                        )
-
-                # Enhance pie chart for banking data
-                chart.update_traces(
-                    textposition='inside',
-                    textinfo='percent+label',
-                    hovertemplate='<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>'
-                )
-
-            elif chart_type == 'line':
-                chart = px.line(
-                    df,
-                    x=config.get('x_column'),
-                    y=config.get('y_column'),
-                    color=config.get('color_column'),
-                    **common_params,
-                    markers=True
-                )
-
-                # Banking time series enhancements
-                chart.update_traces(
-                    line=dict(width=3),
-                    marker=dict(size=8),
-                    hovertemplate='<b>Date:</b> %{x}<br><b>Value:</b> %{y:,.2f}<extra></extra>'
-                )
-
-            elif chart_type == 'scatter':
-                chart = px.scatter(
-                    df,
-                    x=config.get('x_column'),
-                    y=config.get('y_column'),
-                    color=config.get('color_column'),
-                    **common_params,
-                    size_max=60
-                )
-
-            else:
-                # Default banking bar chart
-                if len(df.columns) >= 2:
-                    chart = px.bar(df, x=df.columns[0], y=df.columns[1], **common_params)
-                else:
-                    chart = px.bar(df, y=df.columns[0], **common_params)
-
-            # Banking-specific styling
-            chart.update_layout(
-                plot_bgcolor='rgba(248, 249, 250, 0.8)',
-                paper_bgcolor='white',
-                font=dict(size=12, family="Arial, sans-serif"),
-                title_font_size=18,
-                title_font_color='#2c3e50',
-                showlegend=True if config.get('color_column') else False,
-                height=500,
-                margin=dict(t=80, b=60, l=60, r=60)
-            )
-
-            # Banking compliance styling
-            chart.update_xaxes(
-                showgrid=True,
-                gridwidth=1,
-                gridcolor='rgba(0,0,0,0.1)',
-                title_font=dict(size=14, color='#34495e')
-            )
-            chart.update_yaxes(
-                showgrid=True,
-                gridwidth=1,
-                gridcolor='rgba(0,0,0,0.1)',
-                title_font=dict(size=14, color='#34495e')
-            )
-
-            return chart
-
-        except Exception as e:
-            st.error(f"❌ Error creating banking chart: {e}")
-            return None
-
-    def _get_color_scheme(self, scheme_name: str) -> List[str]:
-        """Get appropriate color scheme for banking data"""
-        if scheme_name in self.banking_colors:
-            return self.banking_colors[scheme_name]
-        return self.chart_colors
-
-    def _generate_banking_title(self, question: str) -> str:
-        """Generate banking-appropriate chart titles"""
-        title = question.strip()
-        if title.endswith('?'):
-            title = title[:-1]
-
-        # Banking-specific title enhancements
-        if 'dormant' in title.lower():
-            title = f"Banking Compliance Analysis: {title}"
-        elif 'account' in title.lower():
-            title = f"Account Analysis: {title}"
-        elif 'balance' in title.lower() or 'amount' in title.lower():
-            title = f"Financial Analysis: {title}"
-
-        return title[:80] + ('...' if len(title) > 80 else '')
-
-    def _generate_banking_insights(self, df: pd.DataFrame, config: Dict[str, Any], question: str) -> str:
-        """Generate banking compliance insights"""
-
-        insights = []
-        insights.append(f"📊 **Banking Analysis Results:** {len(df)} records processed")
-
-        # Financial insights for balance/amount columns
-        if config.get('y_column'):
-            y_col = config['y_column']
-            if y_col in df.columns and pd.api.types.is_numeric_dtype(df[y_col]):
-                total = df[y_col].sum()
-                avg = df[y_col].mean()
-                max_val = df[y_col].max()
-                min_val = df[y_col].min()
-
-                insights.append(f"💰 **Financial Metrics:**")
-                insights.append(f"   • Total Value: ${total:,.2f}")
-                insights.append(f"   • Average: ${avg:,.2f}")
-                insights.append(f"   • Range: ${min_val:,.2f} to ${max_val:,.2f}")
-
-                # Banking-specific thresholds
-                if 'balance' in y_col.lower():
-                    low_balance_count = len(df[df[y_col] < 100])
-                    if low_balance_count > 0:
-                        insights.append(f"⚠️ **Risk Alert:** {low_balance_count} accounts with balance < $100")
-
-                # Top performer analysis
-                if config.get('x_column'):
-                    x_col = config['x_column']
-                    max_idx = df[y_col].idxmax()
-                    top_category = df.loc[max_idx, x_col]
-                    top_value = df.loc[max_idx, y_col]
-                    insights.append(f"🏆 **Top Performer:** {top_category} (${top_value:,.2f})")
-
-        # Compliance insights
-        compliance_keywords = ['dormant', 'flag', 'compliance', 'regulatory']
-        if any(keyword in question.lower() for keyword in compliance_keywords):
-            insights.append("🛡️ **Compliance Note:** Review highlighted items for regulatory requirements")
-
-        # Chart type explanation
-        chart_explanations = {
-            'bar': 'Bar chart showing categorical comparisons for easy analysis',
-            'pie': 'Pie chart displaying distribution percentages across categories',
-            'line': 'Line chart tracking trends and patterns over time',
-            'scatter': 'Scatter plot revealing relationships between variables'
-        }
-
-        chart_type = config.get('chart_type', 'bar')
-        if chart_type in chart_explanations:
-            insights.append(f"📈 **Visualization:** {chart_explanations[chart_type]}")
-
-        return "\n".join(insights)
-
-
-class EnhancedBankingChatbot:
-    """Enhanced chatbot specifically designed for banking compliance with database integration"""
+            schema_text += f"Table: {table_name}\n"
+            for column_name, column_type in columns:
+                schema_text += f"  - {column_name}: {column_type}\n"
+            schema_text += "\n"
+
+        # Add datetime column information
+        if self.datetime_info:
+            schema_text += "DateTime Columns Information:\n"
+            for table_name, datetime_cols in self.datetime_info.items():
+                if datetime_cols:
+                    schema_text += f"Table {table_name}:\n"
+                    for col_info in datetime_cols:
+                        schema_text += f"  - {col_info['column']}: {col_info['type']}\n"
+                    schema_text += "\n"
+
+        return schema_text
+
+
+class AI_Data_Assistant:
+    """A unified AI assistant that can query a database, generate insights, and create visualizations."""
 
     def __init__(self, llm_model):
         self.llm_model = llm_model
         self.sql_analyzer = DatabaseSQLAnalyzer()
-        self.viz_engine = DynamicVisualizationEngine()
-        self.memory = ConversationBufferWindowMemory(
-            memory_key="chat_history",
-            return_messages=True,
-            k=15  # Remember more for banking context
-        )
-        self.setup_banking_chains()
+        self.uploaded_analyzer = UploadedDataAnalyzer()
+        self.data_source = self._determine_data_source()
+        self.setup_chains()
 
-    def setup_banking_chains(self):
-        """Setup LangChain chains optimized for banking compliance"""
+    def _determine_data_source(self) -> str:
+        """Determine whether to use uploaded data or database."""
+        # Priority: uploaded data first, then database
+        if (SESSION_APP_DF in st.session_state and
+                st.session_state[SESSION_APP_DF] is not None and
+                not st.session_state[SESSION_APP_DF].empty):
+            return "uploaded"
+        elif self.sql_analyzer.connection is not None:
+            return "database"
+        else:
+            return "none"
 
+    def setup_chains(self):
+        """Sets up the LangChain chains for SQL generation and text summarization."""
         if not self.llm_model:
-            st.warning("⚠️ LLM model not available - chains not initialized")
+            logger.error("LLM model not provided")
             return
 
-        # Banking-focused SQL Generation Chain
-        banking_sql_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert SQL analyst specializing in banking compliance and dormant account analysis.
+        sql_generation_template = """You are an expert SQL analyst. Your task is to convert natural language questions into precise, executable SQL queries for the specified SQL dialect.
 
-Database Schema:
-{schema}
+            {schema_and_rules}
 
-BANKING DOMAIN EXPERTISE:
-- Focus on account analysis, customer behavior, and compliance requirements
-- Understand dormancy periods, maturity dates, and regulatory triggers
-- Recognize banking terminology and account lifecycle stages
+            CRITICAL INSTRUCTIONS:
+            1. Generate ONLY SELECT statements.
+            2. Use the EXACT table and column names provided in the schema.
+            3. Use the correct date functions for the target SQL dialect.
+            4. Return ONLY the SQL query - no markdown, no explanations, no extra text.
+            5. If you cannot generate a valid query, return: SELECT 1 as no_results WHERE 1=0
 
-SQL GENERATION RULES:
-1. Always use SELECT statements only
-2. Use exact table and column names from schema
-3. For banking queries, focus on key metrics: balances, dates, account status
-4. Use appropriate date filtering for dormancy analysis
-5. Include relevant JOIN conditions for related tables
-6. Use descriptive aliases for calculated fields
-7. Order results logically (by date, amount, or priority)
+            Question: {question}
+            SQL Query:"""
 
-BANKING QUERY PATTERNS:
-- Dormant accounts: Check Date_Last_Customer_Communication_Any_Type and Date_Last_Cust_Initiated_Activity
-- Account analysis: Group by Account_Type, analyze Current_Balance
-- Compliance flags: Check Expected_Account_Dormant and related fields
-- Customer activity: Look at communication dates and response flags
+        sql_generation_prompt = ChatPromptTemplate.from_template(sql_generation_template)
 
-Generate only the SQL query without explanations.
-            """),
-            ("human", "{question}")
-        ])
-
-        self.banking_sql_chain = (
-                RunnablePassthrough.assign(
-                    schema=lambda
-                        _: self.sql_analyzer.get_schema_description() if self.sql_analyzer else "No schema available"
-                )
-                | banking_sql_prompt
+        self.sql_generation_chain = (
+                RunnablePassthrough.assign(schema_and_rules=lambda _: self._get_schema_and_rules_for_prompt())
+                | sql_generation_prompt
                 | self.llm_model
                 | StrOutputParser()
         )
 
-        # Banking Insight Generation Chain
-        banking_insight_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a banking compliance expert providing insights on data analysis results.
+        insight_generation_prompt = ChatPromptTemplate.from_messages([
+            ("system",
+             """You are a helpful data analyst. Based on the user's question and query results, provide a concise, insightful summary of the key findings. 
 
-BANKING EXPERTISE FOCUS:
-- Dormant account management and compliance
-- Customer communication and activity patterns
-- Regulatory requirements and timelines
-- Risk assessment and mitigation
-- Account lifecycle management
+             Format your response as:
+             1. Direct answer to the question (1-2 sentences)
+             2. Key insights from the data (2-3 bullet points)
+             3. Any notable patterns or recommendations (if applicable)
 
-INSIGHT GUIDELINES:
-- Provide actionable recommendations
-- Highlight compliance risks and requirements
-- Suggest follow-up actions for bank staff
-- Identify patterns that need attention
-- Reference regulatory considerations when relevant
-
-Keep insights professional, concise, and focused on banking operations.
-            """),
+             Keep it concise but informative."""),
             ("human",
-             "Banking Query: {question}\nData Analysis: {results_summary}\nProvide compliance-focused insights.")
+             "Question: '{question}'\nQuery returned {row_count} rows.\nData preview: {data_preview}\n\nPlease summarize the findings.")
         ])
 
-        self.banking_insight_chain = (
-                banking_insight_prompt
+        self.insight_generation_chain = (
+                insight_generation_prompt
                 | self.llm_model
                 | StrOutputParser()
         )
 
-    def process_banking_query(self, user_query: str) -> Tuple[str, Optional[Any]]:
-        """Process banking-specific queries with enhanced context"""
+    def _create_sqlite_aware_prompt(self) -> str:
+        """Builds a set of instructions for handling datetime queries in SQLite."""
+        return """
+SQL DIALECT: SQLite
 
-        try:
-            st.info(f"🏦 **Processing Banking Query:** '{user_query}'")
+DATETIME GUIDELINES FOR SQLite:
+- Use `datetime('now')` for the current timestamp. Use `date('now')` for the current date.
+- Use `strftime('%Y', date_column)` to get the year. `strftime('%m', ...)` for month.
+- To subtract time, use modifiers: `datetime('now', '-1 year')`, `date('now', 'start of month', '-1 month')`.
+- For date ranges: `WHERE date_column BETWEEN '2023-01-01' AND '2023-12-31'`
 
-            if not self.llm_model:
-                return "🚫 AI features are disabled. Please check API key configuration.", None
+TEMPORAL KEYWORDS MAPPING (SQLite):
+- "this year" -> `WHERE strftime('%Y', date_column) = strftime('%Y', 'now')`
+- "last year" -> `WHERE strftime('%Y', date_column) = CAST(strftime('%Y', 'now') AS INTEGER) - 1`
+- "this month" -> `WHERE strftime('%Y-%m', date_column) = strftime('%Y-%m', 'now')`
+- "last month" -> `WHERE date(date_column) BETWEEN date('now', 'start of month', '-1 month') AND date('now', 'start of month', '-1 day')`
+- "last 30 days" -> `WHERE date(date_column) >= date('now', '-30 days')`
+- "today" -> `WHERE date(date_column) = date('now')`
+"""
 
-            if not self.sql_analyzer.connection:
-                return "❌ Database connection not available. Please check database configuration.", None
+    def _create_sql_server_aware_prompt(self) -> str:
+        """Builds a detailed set of instructions for handling datetime queries in SQL Server."""
+        return """
+SQL DIALECT: SQL Server
 
-            # Step 1: Generate banking-focused SQL
-            st.info("🧠 **Step 1:** Generating banking compliance SQL...")
-            sql_query = self._generate_banking_sql(user_query)
+DATETIME GUIDELINES FOR SQL SERVER:
+- Use `GETDATE()` for the current date/time.
+- Use `DATEADD(month, -1, GETDATE())` to subtract time.
+- Use `YEAR(date_column)`, `MONTH(date_column)`.
 
-            # Step 2: Execute on Azure SQL Database
-            st.info("⚡ **Step 2:** Executing query on Azure SQL Database...")
-            query_results = self._execute_banking_sql(sql_query)
+TEMPORAL KEYWORDS MAPPING (SQL Server):
+- "this year" -> `WHERE YEAR(date_column) = YEAR(GETDATE())`
+- "last year" -> `WHERE YEAR(date_column) = YEAR(GETDATE()) - 1`
+- "this month" -> `WHERE YEAR(date_column) = YEAR(GETDATE()) AND MONTH(date_column) = MONTH(GETDATE())`
+- "last month" -> `WHERE date_column >= DATEADD(MONTH, -1, DATEADD(DAY, 1 - DAY(GETDATE()), GETDATE())) AND date_column < DATEADD(DAY, 1 - DAY(GETDATE()), GETDATE())`
+- "last 30 days" -> `WHERE date_column >= DATEADD(DAY, -30, GETDATE())`
+- "today" -> `WHERE CAST(date_column AS DATE) = CAST(GETDATE() AS DATE)`
+"""
 
-            # Step 3: Create banking visualization
-            st.info("📊 **Step 3:** Creating banking compliance visualization...")
-            chart, viz_insights = self.viz_engine.analyze_and_visualize(
-                query_results, sql_query, user_query
-            )
+    def _get_business_rules_prompt(self) -> str:
+        """Defines specific business logic for complex queries."""
+        business_rules = """
+BUSINESS RULES:
+- "Dormant Account": An account where the `Expected_Account_Dormant` column is 'Yes'.
+- "CBUAE Transfer Eligibility": An account where `Freeze_Threshold_Date` is in the past and `Current_Balance` > 0.
+"""
+        return business_rules
 
-            # Step 4: Generate banking insights
-            st.info("💡 **Step 4:** Generating banking compliance insights...")
-            banking_insights = self._generate_banking_insights(user_query, query_results)
-
-            # Step 5: Combine insights
-            final_response = self._combine_banking_insights(viz_insights, banking_insights, query_results)
-
-            st.success("✅ **Banking Analysis Complete!**")
-            return final_response, chart
-
-        except Exception as e:
-            error_msg = f"❌ **Banking Analysis Failed:** {str(e)}"
-            st.error(error_msg)
-
-            # Provide banking-specific fallback
-            try:
-                fallback_response = self._provide_banking_fallback(user_query)
-                return fallback_response, None
-            except:
-                return error_msg, None
-
-    def _generate_banking_sql(self, question: str) -> str:
-        """Generate banking-focused SQL queries"""
-        try:
-            if not self.banking_sql_chain:
-                raise Exception("Banking SQL chain not initialized")
-
-            sql_query = self.banking_sql_chain.invoke({"question": question})
-
-            # Clean the SQL query
-            sql_query = re.sub(r'^```sql\s*|\s*```$', '', sql_query.strip())
-            sql_query = re.sub(r'^```\s*|\s*```$', '', sql_query.strip())
-
-            if not sql_query or not sql_query.upper().startswith('SELECT'):
-                sql_query = self._generate_banking_fallback_sql(question)
-
-            return sql_query
-        except Exception as e:
-            st.warning(f"⚠️ Banking SQL generation failed: {e}. Using fallback.")
-            return self._generate_banking_fallback_sql(question)
-
-    def _generate_banking_fallback_sql(self, question: str) -> str:
-        """Generate banking-specific fallback SQL queries"""
-        question_lower = question.lower()
-        primary_table = self.sql_analyzer.primary_table or 'accounts_data'
-
-        # Banking-specific query patterns
-        if 'dormant' in question_lower:
-            return f"SELECT Account_ID, Customer_ID, Account_Type, Current_Balance, Date_Last_Cust_Initiated_Activity FROM {primary_table} WHERE Expected_Account_Dormant = 'Yes' ORDER BY Date_Last_Cust_Initiated_Activity"
-        elif 'balance' in question_lower:
-            return f"SELECT Account_Type, AVG(Current_Balance) as Avg_Balance, COUNT(*) as Account_Count FROM {primary_table} GROUP BY Account_Type ORDER BY Avg_Balance DESC"
-        elif 'account' in question_lower and 'type' in question_lower:
-            return f"SELECT Account_Type, COUNT(*) as Count FROM {primary_table} GROUP BY Account_Type ORDER BY Count DESC"
-        elif 'customer' in question_lower:
-            return f"SELECT Customer_ID, Account_Type, Current_Balance, Date_Last_Cust_Initiated_Activity FROM {primary_table} ORDER BY Current_Balance DESC"
-        elif 'top' in question_lower:
-            return f"SELECT TOP 10 Account_ID, Customer_ID, Current_Balance FROM {primary_table} ORDER BY Current_Balance DESC"
+    def _get_schema_and_rules_for_prompt(self):
+        """Constructs the full schema and rules text, dynamically selecting the SQL dialect guidance."""
+        if self.data_source == "uploaded":
+            schema_text = self.uploaded_analyzer.get_schema_for_prompt()
+            dialect_rules = self._create_sqlite_aware_prompt()
         else:
-            return f"SELECT TOP 100 * FROM {primary_table} ORDER BY Account_Creation_Date DESC"
+            schema_text = self.sql_analyzer.get_schema_for_prompt()
+            dialect_rules = self._create_sql_server_aware_prompt()
 
-    def _execute_banking_sql(self, sql_query: str) -> pd.DataFrame:
-        """Execute banking SQL with enhanced error handling"""
+        business_rules = self._get_business_rules_prompt()
+        return f"{dialect_rules}\n{schema_text}\n{business_rules}"
+
+    def process_query(self, user_query: str) -> Tuple[str, Optional[pd.DataFrame]]:
+        """Main processing pipeline: NL -> SQL -> Data -> Insight -> (Hand off to viz)."""
         try:
-            result_df = self.sql_analyzer.execute_sql(sql_query, save_to_history=True)
+            # Re-determine data source in case it changed
+            self.data_source = self._determine_data_source()
 
-            if result_df.empty:
-                st.warning("⚠️ Query returned no results - trying broader analysis")
-                fallback_query = f"SELECT TOP 50 * FROM {self.sql_analyzer.primary_table}"
-                result_df = self.sql_analyzer.execute_sql(fallback_query, save_to_history=False)
+            if self.data_source == "none":
+                return "❌ **No data available.** Please upload data or connect to a database first.", None
 
-            return result_df
+            # Generate SQL
+            with st.spinner("🧠 Generating SQL..."):
+                sql_query = self._generate_sql(user_query)
+                logger.info(f"Generated SQL for {self.data_source} source: {sql_query}")
+
+            # Execute SQL based on data source
+            if self.data_source == "uploaded":
+                query_results = self.uploaded_analyzer.execute_pandas_query(sql_query)
+            else:
+                query_results = self.sql_analyzer.execute_sql(sql_query)
+
+            # Generate insights
+            if not query_results.empty:
+                with st.spinner("💡 Generating insights..."):
+                    text_insights = self._generate_text_insights(user_query, query_results)
+            else:
+                text_insights = "The query ran successfully but returned no data. Your criteria might be too specific, or there might be no records matching your request."
+
+            return text_insights, query_results
 
         except Exception as e:
-            st.error(f"❌ Banking SQL execution failed: {e}")
-            # Return empty DataFrame as fallback
-            return pd.DataFrame()
+            logger.error(f"Error in process_query: {str(e)}")
+            error_message = f"❌ **Error processing your query:** {str(e)}\n\nPlease try rephrasing your question or check if your request is supported."
+            return error_message, None
 
-    def _generate_banking_insights(self, question: str, results: pd.DataFrame) -> str:
-        """Generate banking compliance insights"""
+    def _generate_sql(self, question: str) -> str:
+        """Generates a SQL query from a natural language question."""
         try:
-            if not self.banking_insight_chain or results.empty:
-                return self._generate_basic_banking_insights(results)
+            sql_query = self.sql_generation_chain.invoke({"question": question})
+            logger.info(f"Raw SQL from LLM: {sql_query}")
 
-            # Create banking-focused summary
-            results_summary = self._create_banking_summary(results)
+            # Clean up the query more thoroughly
+            cleaned_query = re.sub(r'^```sql\s*|\s*```$', '', sql_query.strip())
+            cleaned_query = re.sub(r'^```\s*|\s*```$', '', cleaned_query.strip())
 
-            insights = self.banking_insight_chain.invoke({
+            if not cleaned_query:
+                raise Exception("LLM returned empty query")
+
+            return cleaned_query
+
+        except Exception as e:
+            logger.error(f"Error generating SQL: {str(e)}")
+            raise Exception(f"Failed to generate SQL query: {str(e)}")
+
+    def _generate_text_insights(self, question: str, results: pd.DataFrame) -> str:
+        """Generates a text summary of the query results."""
+        try:
+            # Create a preview of the data for context
+            data_preview = ""
+            if not results.empty:
+                # Show first few rows or summary statistics
+                if len(results) <= 5:
+                    data_preview = results.to_string(index=False)
+                else:
+                    data_preview = f"First 3 rows:\n{results.head(3).to_string(index=False)}\n\nColumns: {list(results.columns)}"
+
+            insights = self.insight_generation_chain.invoke({
                 "question": question,
-                "results_summary": results_summary
+                "row_count": len(results),
+                "data_preview": data_preview[:500]  # Limit preview size
             })
 
-            return insights if insights else self._generate_basic_banking_insights(results)
+            return insights
 
         except Exception as e:
-            st.warning(f"⚠️ Banking insight generation failed: {e}")
-            return self._generate_basic_banking_insights(results)
-
-    def _create_banking_summary(self, results: pd.DataFrame) -> str:
-        """Create banking-focused data summary"""
-        summary = []
-        summary.append(f"Banking Data Analysis: {len(results)} records")
-
-        # Identify banking-specific columns
-        banking_columns = {
-            'balance_cols': [col for col in results.columns if 'balance' in col.lower() or 'amount' in col.lower()],
-            'date_cols': [col for col in results.columns if 'date' in col.lower()],
-            'status_cols': [col for col in results.columns if
-                            any(term in col.lower() for term in ['status', 'type', 'flag'])],
-            'id_cols': [col for col in results.columns if col.lower().endswith('_id')]
-        }
-
-        # Financial summary
-        if banking_columns['balance_cols']:
-            summary.append("Financial Summary:")
-            for col in banking_columns['balance_cols'][:3]:
-                if pd.api.types.is_numeric_dtype(results[col]):
-                    total = results[col].sum()
-                    avg = results[col].mean()
-                    summary.append(f"  - {col}: Total=${total:,.2f}, Average=${avg:,.2f}")
-
-        # Account type distribution
-        if 'Account_Type' in results.columns:
-            type_dist = results['Account_Type'].value_counts()
-            summary.append(f"Account Types: {dict(type_dist.head())}")
-
-        # Date range analysis
-        date_cols = [col for col in results.columns if
-                     'date' in col.lower() and pd.api.types.is_datetime64_any_dtype(results[col])]
-        if date_cols:
-            for col in date_cols[:2]:
-                if results[col].notna().any():
-                    min_date = results[col].min()
-                    max_date = results[col].max()
-                    summary.append(f"{col}: {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}")
-
-        return "\n".join(summary)
-
-    def _generate_basic_banking_insights(self, results: pd.DataFrame) -> str:
-        """Generate basic banking insights as fallback"""
-        if results.empty:
-            return "📊 **No data found for analysis**"
-
-        insights = []
-        insights.append(f"🏦 **Banking Data Summary:** {len(results)} records analyzed")
-
-        # Basic column analysis
-        numeric_cols = results.select_dtypes(include=[np.number]).columns
-        if len(numeric_cols) > 0:
-            insights.append("💰 **Financial Overview:**")
-            for col in numeric_cols[:3]:
-                if 'balance' in col.lower() or 'amount' in col.lower():
-                    total = results[col].sum()
-                    avg = results[col].mean()
-                    insights.append(f"   • {col}: Total=${total:,.2f}, Average=${avg:,.2f}")
-
-        # Account type analysis
-        if 'Account_Type' in results.columns:
-            type_counts = results['Account_Type'].value_counts()
-            insights.append(f"📋 **Account Types:** {len(type_counts)} different types found")
-            for acc_type, count in type_counts.head(3).items():
-                insights.append(f"   • {acc_type}: {count} accounts")
-
-        return "\n".join(insights)
-
-    def _combine_banking_insights(self, viz_insights: str, banking_insights: str, results: pd.DataFrame) -> str:
-        """Combine banking-focused insights"""
-        response_parts = []
-
-        # Banking compliance header
-        response_parts.append("🏦 **Banking Compliance Analysis Results**")
-        response_parts.append("=" * 50)
-        response_parts.append("")
-
-        # Add banking insights first
-        if banking_insights and banking_insights.strip():
-            response_parts.append("🎯 **Business Intelligence:**")
-            response_parts.append(banking_insights)
-            response_parts.append("")
-
-        # Add visualization insights
-        if viz_insights and viz_insights.strip():
-            response_parts.append(viz_insights)
-            response_parts.append("")
-
-        # Add compliance notes
-        response_parts.append("📊 **Data Quality Check:**")
-        response_parts.append(f"   • Records Processed: {len(results):,}")
-        response_parts.append(f"   • Data Fields: {len(results.columns)}")
-
-        # Add regulatory reminder
-        response_parts.append("")
-        response_parts.append(
-            "⚖️ **Compliance Reminder:** Ensure all flagged accounts are reviewed according to regulatory requirements.")
-
-        return "\n".join(response_parts)
-
-    def _provide_banking_fallback(self, question: str) -> str:
-        """Provide banking-specific fallback analysis"""
-        schema_info = self.sql_analyzer.schema_info or {}
-
-        return f"""
-        🏦 **Banking System Status Report**
-
-        📊 **Database Connection:** {'✅ Connected' if self.sql_analyzer.connection else '❌ Disconnected'}
-        📋 **Available Tables:** {len(schema_info)} tables found
-        🔍 **Query:** "{question}"
-
-        📈 **Available Banking Data:**
-        {self._format_available_tables(schema_info)}
-
-        💡 **Suggested Actions:**
-        1. Try simpler queries like "show me account data"
-        2. Ask for "account types distribution"
-        3. Request "dormant accounts summary"
-        4. Check "database connection status"
-
-        🛠️ **Technical Status:**
-        - Primary Table: {self.sql_analyzer.primary_table or 'Not identified'}
-        - AI Model: {'Available' if self.llm_model else 'Not available'}
-        """
-
-    def _format_available_tables(self, schema_info: Dict) -> str:
-        """Format available tables for display"""
-        if not schema_info:
-            return "   • No tables available"
-
-        formatted = []
-        for table_name, columns in schema_info.items():
-            row_count = self.sql_analyzer.get_table_row_count(table_name)
-            formatted.append(f"   • {table_name}: {len(columns)} columns, {row_count:,} rows")
-
-        return "\n".join(formatted[:5]) + (
-            f"\n   • ... and {len(schema_info) - 5} more tables" if len(schema_info) > 5 else "")
+            logger.error(f"Error generating insights: {str(e)}")
+            return f"Query returned {len(results)} rows. The data is ready for analysis, but I couldn't generate detailed insights due to an error: {str(e)}"
 
 
-def get_response_and_chart(user_query, current_data, llm_model):
-    """
-    Main entry point using database connection instead of uploaded data
-    """
+def display_chat_interface(llm_model):
+    """Renders the main Streamlit chat interface for the AI Data Assistant."""
     try:
-        # Initialize banking chatbot with database connectivity
-        chatbot = EnhancedBankingChatbot(llm_model)
+        if "assistant" not in st.session_state:
+            with st.spinner("🚀 Initializing AI Assistant..."):
+                st.session_state.assistant = AI_Data_Assistant(llm_model)
 
-        # Process query through banking pipeline
-        response_text, chart = chatbot.process_banking_query(user_query)
+        assistant = st.session_state.assistant
 
-        return response_text, chart
+        # Check system status and show appropriate message
+        if not assistant.llm_model:
+            st.error("🔴 **AI Model Not Loaded.** Please check your API key and restart the app.")
+            return
+
+        # Determine current data source and show status
+        current_data_source = assistant._determine_data_source()
+
+        if current_data_source == "uploaded":
+            uploaded_df = st.session_state.get(SESSION_APP_DF)
+            if uploaded_df is not None:
+                st.success(
+                    f"🟢 **System Ready** - Using uploaded data ({len(uploaded_df)} rows, {len(uploaded_df.columns)} columns)")
+            else:
+                st.warning("⚠️ **Uploaded data reference lost.** Please re-upload your data.")
+                return
+        elif current_data_source == "database":
+            st.success("🟢 **System Ready** - Using database connection")
+        else:
+            st.warning("⚠️ **No data source available.** Please upload data or connect to a database.")
+            return
 
     except Exception as e:
-        error_msg = f"❌ **Banking System Error:** {str(e)}"
-        st.error(error_msg)
-
-        # Provide system status as fallback
-        try:
-            db_conn = get_db_connection()
-            db_status = "✅ Connected" if db_conn else "❌ Disconnected"
-
-            basic_info = f"""
-            🏦 **Banking System Status:**
-
-            🔗 **Database:** {db_status}
-            🤖 **AI Model:** {'Available' if llm_model else 'Not Available'}
-            📊 **Query:** "{user_query}"
-
-            💡 **System Recovery Options:**
-            1. Check database connection settings
-            2. Verify API key configuration
-            3. Try basic queries like "show tables"
-            4. Contact system administrator
-
-            🛠️ **Error Details:** {str(e)[:200]}
-            """
-            return basic_info, None
-        except:
-            return error_msg, None
-
-
-def display_chat_interface(df, llm):
-    """
-    Enhanced banking compliance chat interface with database integration
-    """
-    st.header("🏦 Banking Compliance AI Assistant")
-
-    # System status dashboard
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        db_conn = get_db_connection()
-        if db_conn:
-            st.success("✅ Database")
-            st.caption("Azure SQL Connected")
-        else:
-            st.error("❌ Database")
-            st.caption("Connection Failed")
-
-    with col2:
-        if llm:
-            st.success("✅ AI Model")
-            st.caption("LLM Ready")
-        else:
-            st.error("❌ AI Model")
-            st.caption("API Key Needed")
-
-    with col3:
-        schema_info = get_db_schema()
-        if schema_info:
-            st.success(f"✅ Schema ({len(schema_info)} tables)")
-            st.caption("Loaded Successfully")
-        else:
-            st.error("❌ Schema")
-            st.caption("Not Available")
-
-    with col4:
-        try:
-            chatbot = EnhancedBankingChatbot(llm)
-            st.success("✅ Chatbot")
-            st.caption("Ready for Analysis")
-        except:
-            st.error("❌ Chatbot")
-            st.caption("Initialization Failed")
-
-    # Show system requirements if not met
-    if not db_conn or not llm:
-        st.error("🚫 **System Requirements Not Met**")
-
-        missing_components = []
-        if not db_conn:
-            missing_components.append("Database connection (check secrets.toml or environment variables)")
-        if not llm:
-            missing_components.append("AI model (configure GROQ API key)")
-
-        st.info(f"**Missing:** {', '.join(missing_components)}")
-
-        # Show basic database info if available
-        if db_conn:
-            with st.expander("📊 Database Schema Preview", expanded=False):
-                schema = get_db_schema()
-                if schema:
-                    for table_name, columns in schema.items():
-                        st.write(f"**{table_name}**")
-                        col_list = [f"{col[0]} ({col[1]})" for col in columns[:5]]
-                        if len(columns) > 5:
-                            col_list.append(f"... +{len(columns) - 5} more")
-                        st.write(f"   • {', '.join(col_list)}")
+        logger.error(f"Fatal error during assistant initialization: {e}")
+        st.error(f"❌ **Initialization Error:** {e}")
         return
 
-    # Banking compliance capabilities
-    with st.expander("🏦 Banking Compliance Capabilities", expanded=False):
-        st.markdown("""
-        **🔥 AI-Powered Banking Analysis:**
-
-        **🎯 Specialized for Banking:**
-        - Dormant account identification and analysis
-        - Customer communication tracking
-        - Compliance flag monitoring
-        - Account lifecycle management
-        - Regulatory timeline tracking
-
-        **📊 Advanced Analytics:**
-        - Account balance distributions
-        - Customer activity patterns
-        - Dormancy trend analysis
-        - Compliance risk assessment
-        - Maturity date tracking
-
-        **✨ Example Banking Queries:**
-        - *"Show me all dormant accounts"*
-        - *"What's the distribution of account types?"*
-        - *"Find accounts with balance over $10,000"*
-        - *"Show customers with no recent communication"*
-        - *"Analyze FTD maturity dates coming up"*
-
-        **🛡️ Compliance Features:**
-        - Automatic regulatory flagging
-        - Timeline tracking for Article 3 processes
-        - Communication requirement monitoring
-        - Customer response tracking
-        """)
-
-    # Database schema explorer
-    with st.expander("📋 Database Schema Explorer", expanded=False):
-        schema = get_db_schema()
-        if schema:
-            selected_table = st.selectbox("Select Table to Explore:", list(schema.keys()))
-            if selected_table:
-                st.write(f"**Table: {selected_table}**")
-                columns = schema[selected_table]
-
-                # Create a formatted display
-                col_df = pd.DataFrame(columns, columns=['Column Name', 'Data Type'])
-                st.dataframe(col_df, use_container_width=True)
-
-                # Quick query builder
-                st.write("**Quick Query Builder:**")
-                if st.button(f"Show sample data from {selected_table}"):
-                    sample_query = f"Show me sample data from {selected_table}"
-                    st.session_state['auto_query'] = sample_query
-                    st.rerun()
-
-    # Initialize chat with banking context
+    # Initialize Chat History with dynamic message
     if SESSION_CHAT_MESSAGES not in st.session_state:
-        schema = get_db_schema()
-        table_count = len(schema) if schema else 0
+        data_source_msg = "uploaded data" if current_data_source == "uploaded" else "database"
+        st.session_state[SESSION_CHAT_MESSAGES] = [{
+            "role": "assistant",
+            "content": f"Hello! I'm your AI Data Assistant. I can help you analyze your {data_source_msg} by answering questions in natural language. What would you like to know about your data?"
+        }]
 
-        initial_message = f"""
-        🏦 **Welcome to Banking Compliance AI Assistant!**
-
-        **System Status:**
-        ✅ Connected to Azure SQL Database
-        ✅ {table_count} banking tables loaded
-        ✅ AI compliance analysis ready
-
-        **🎯 I specialize in:**
-        - Dormant account analysis and compliance
-        - Customer activity and communication tracking  
-        - Account balance and type distributions
-        - Regulatory timeline monitoring
-        - Risk assessment and flagging
-
-        **💡 Try asking:**
-        - "Show me dormant accounts that need attention"
-        - "What's the breakdown of account types?"
-        - "Find high-value accounts with no recent activity"
-        - "Analyze customer response rates to bank contact"
-
-        **Ready to help with your banking compliance needs!**
-        """
-        st.session_state[SESSION_CHAT_MESSAGES] = [{"role": "assistant", "content": initial_message}]
-
-    # Display chat messages
-    for i, message in enumerate(st.session_state[SESSION_CHAT_MESSAGES]):
+    # Display Chat History
+    for message in st.session_state[SESSION_CHAT_MESSAGES]:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-            if "chart" in message and message["chart"] is not None:
-                try:
-                    st.plotly_chart(message["chart"], use_container_width=True, key=f"banking_chart_{i}")
-                    st.success("✅ Banking compliance chart generated!")
-                except Exception as e:
-                    st.error(f"❌ Chart display error: {e}")
+            # Display results if available
+            if "results_df" in message and message["results_df"] is not None:
+                results_df = message["results_df"]
+                if not results_df.empty:
+                    # Show visualization
+                    try:
+                        auto_visualize(results_df)
+                    except Exception as e:
+                        logger.warning(f"Visualization failed: {e}")
+                        st.warning("Could not generate visualization for this data.")
 
-    # Banking-specific quick actions
-    st.write("**🚀 Banking Quick Actions:**")
-    quick_col1, quick_col2, quick_col3, quick_col4 = st.columns(4)
+                    # Show raw data in expander
+                    with st.expander(f"📊 View Raw Data ({len(results_df)} rows)"):
+                        st.dataframe(results_df, use_container_width=True)
+                else:
+                    st.info("Query returned no results.")
 
-    with quick_col1:
-        if st.button("🚨 Dormant Accounts", use_container_width=True):
-            st.session_state[
-                'auto_query'] = "Show me all accounts that are expected to be dormant with their last activity dates"
+    # Example Questions Expander
+    with st.expander("💡 Example Questions"):
+        st.markdown("""
+        **Basic Queries:**
+        - "How many accounts are there in total?"
+        - "Show me the 10 accounts with the highest balance"
+        - "What is the average account balance?"
 
-    with quick_col2:
-        if st.button("💰 Account Balances", use_container_width=True):
-            st.session_state['auto_query'] = "Show me the distribution of account balances by account type"
+        **Date-based Queries:**
+        - "Show me accounts created in the last 6 months"
+        - "What is the monthly trend of account creation this year?"
+        - "How many accounts were created in January 2024?"
+        - "Which accounts were opened last year?"
+        - "Show me activity from last month"
 
-    with quick_col3:
-        if st.button("📞 Communication Status", use_container_width=True):
-            st.session_state['auto_query'] = "Analyze customer communication and response patterns"
+        **Business-specific Queries:**
+        - "Show me accounts that are eligible for CBUAE transfer"
+        - "Which accounts are dormant?"
+        - "Show me accounts with balances over $10,000"
+        """)
 
-    with quick_col4:
-        if st.button("📊 Compliance Overview", use_container_width=True):
-            st.session_state['auto_query'] = "Give me a comprehensive compliance overview of all accounts"
-
-    # Handle auto queries from quick actions
-    prompt = None
-    if 'auto_query' in st.session_state:
-        prompt = st.session_state['auto_query']
-        del st.session_state['auto_query']
-
-    # Chat input
-    if not prompt:
-        prompt = st.chat_input(
-            placeholder="Ask about dormant accounts, compliance status, account analysis..."
-        )
-
-    if prompt:
+    # User Input
+    if prompt := st.chat_input("Ask a question about your data..."):
         # Add user message
         st.session_state[SESSION_CHAT_MESSAGES].append({"role": "user", "content": prompt})
 
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        # Process through banking system
+        # Process and add assistant response
         with st.chat_message("assistant"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
             try:
-                progress_bar.progress(25)
-                status_text.text("🏦 Analyzing banking query...")
+                response_text, results_df = assistant.process_query(prompt)
 
-                progress_bar.progress(50)
-                status_text.text("🔍 Querying Azure SQL Database...")
+                # Display the response
+                st.markdown(response_text)
 
-                progress_bar.progress(75)
-                status_text.text("📊 Creating compliance visualization...")
+                # Handle results
+                if results_df is not None and not results_df.empty:
+                    # Show visualization
+                    try:
+                        auto_visualize(results_df)
+                    except Exception as e:
+                        logger.warning(f"Visualization failed: {e}")
+                        st.warning("Could not generate visualization for this data.")
 
-                # Process query through banking system
-                response_text, chart_obj = get_response_and_chart(prompt, None, llm)
+                    # Show raw data in expander
+                    with st.expander(f"📊 View Raw Data ({len(results_df)} rows)"):
+                        st.dataframe(results_df, use_container_width=True)
 
-                progress_bar.progress(100)
-                status_text.text("✅ Banking analysis complete!")
+                elif results_df is not None and results_df.empty:
+                    st.info("Query executed successfully but returned no results.")
 
-                # Clear progress
-                progress_bar.empty()
-                status_text.empty()
-
-                # Display results
-                if response_text:
-                    st.markdown(response_text)
-
-                if chart_obj is not None:
-                    st.plotly_chart(chart_obj, use_container_width=True)
-                    st.success("✅ Banking compliance visualization generated!")
-
-                # Add to chat history
-                assistant_response = {"role": "assistant", "content": response_text or "Analysis completed."}
-                if chart_obj is not None:
-                    assistant_response["chart"] = chart_obj
+                # Save assistant response
+                assistant_response = {
+                    "role": "assistant",
+                    "content": response_text,
+                    "results_df": results_df
+                }
                 st.session_state[SESSION_CHAT_MESSAGES].append(assistant_response)
 
             except Exception as e:
-                progress_bar.empty()
-                status_text.empty()
-
-                error_msg = f"""
-                ❌ **Banking Analysis Error:** {str(e)}
-
-                🔧 **Troubleshooting:**
-                1. Check database connection status above
-                2. Verify table permissions
-                3. Try simpler queries like "show account types"
-                4. Use quick action buttons above
-
-                💡 **Alternative Queries:**
-                - "What tables are available?"
-                - "Show me sample account data"
-                - "Check database connection"
-                """
-
+                error_msg = f"❌ **An error occurred:** {str(e)}"
                 st.error(error_msg)
-                st.session_state[SESSION_CHAT_MESSAGES].append({"role": "assistant", "content": error_msg})
+                logger.error(f"Chat interface error: {str(e)}")
 
-    # Enhanced footer with banking context
-    st.markdown("---")
-    footer_col1, footer_col2, footer_col3, footer_col4 = st.columns(4)
+                # Save error message
+                st.session_state[SESSION_CHAT_MESSAGES].append({
+                    "role": "assistant",
+                    "content": error_msg
+                })
 
-    with footer_col1:
-        if st.button("🗑️ Clear Chat", use_container_width=True):
-            st.session_state[SESSION_CHAT_MESSAGES] = []
-            st.rerun()
-
-    with footer_col2:
-        if st.button("📊 Query History", use_container_width=True):
-            try:
-                from database.operations import get_recent_sql_history
-                history = get_recent_sql_history(5)
-                if history is not None and not history.empty:
-                    st.dataframe(history, use_container_width=True)
-                else:
-                    st.info("No query history available")
-            except Exception as e:
-                st.error(f"Could not load history: {e}")
-
-    with footer_col3:
-        if st.button("🔄 Refresh Schema", use_container_width=True):
-            get_db_schema.clear()  # Clear cache
-            st.success("✅ Schema cache refreshed!")
-            st.rerun()
-
-    with footer_col4:
-        if st.button("🏦 System Status", use_container_width=True):
-            db_status = "✅ Connected" if get_db_connection() else "❌ Disconnected"
-            ai_status = "✅ Ready" if llm else "❌ Not Available"
-            schema_status = "✅ Loaded" if get_db_schema() else "❌ Not Available"
-
-            st.info(f"""
-            **Banking System Status:**
-            - Database: {db_status}
-            - AI Model: {ai_status}  
-            - Schema: {schema_status}
-            """)
+        # Rerun to show the new messages
+        st.rerun()
 
 
-def render_chatbot(df, llm_model):
-    """
-    Compatibility wrapper - now uses database instead of uploaded DataFrame
-    """
-    return display_chat_interface(df, llm_model)
+def render_chatbot(llm_model):
+    """Main entry point for the chatbot UI."""
+    return display_chat_interface(llm_model)

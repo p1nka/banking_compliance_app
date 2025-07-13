@@ -5,13 +5,20 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="63761940-712c-4363-bb8e-5dc1b9ff83c9" name="Changes" comment="kubernetes files">
+      <change beforePath="$PROJECT_DIR$/.idea/Banking_Compliance_app.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Banking_Compliance_app.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/agents/dormant.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/dormant.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.streamlit/secrets.toml" beforeDir="false" afterPath="$PROJECT_DIR$/.streamlit/secrets.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/agents/compliance.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/compliance.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ai/chatbot.py" beforeDir="false" afterPath="$PROJECT_DIR$/ai/chatbot.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ai/visualizations.py" beforeDir="false" afterPath="$PROJECT_DIR$/ai/visualizations.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/database/operations.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/operations.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/database/pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/pipeline.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/database/schema.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/schema.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ui/compliance_ui.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/compliance_ui.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ui/dormant_ui.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/dormant_ui.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ui/sidebar.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/sidebar.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ui/chatbot_ui.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/chatbot_ui.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ui/sqlbot_ui.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/sqlbot_ui.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

@@ -108,7 +108,7 @@ def save_to_db(df, table_name="accounts_data"):
 
                 # Build the INSERT statement template
                 db_columns_str = ','.join([f'[{c}]' for c in db_cols])  # Enclose column names in brackets
-                placeholders = ','.join(['?'] * len(cols_to_save))
+                placeholders = ','.join(['%s'] * len(cols_to_save))
                 insert_sql = f"INSERT INTO {table_name} ({db_columns_str}) VALUES ({placeholders})"
 
                 # Prepare values as tuples for executemany
@@ -154,7 +154,7 @@ def save_summary_to_db(observation, trend, insight, action):
             cursor = conn.cursor()
             insert_sql = """
                          INSERT INTO insight_log (timestamp, observation, trend, insight, action)
-                         VALUES (?, ?, ?, ?, ?)
+                         VALUES (%s, %s, %s, %s, %s)
                          """
             timestamp = datetime.now()
             # Ensure data types match DB schema NVARCHAR(MAX)
@@ -190,7 +190,7 @@ def save_sql_query_to_history(nl_query, sql_query):
 
             # Insert the query into history
             cursor.execute(
-                "INSERT INTO sql_query_history (natural_language_query, sql_query) VALUES (?, ?)",
+                "INSERT INTO sql_query_history (natural_language_query, sql_query) VALUES (%s, %s)",
                 (nl_query, sql_query)
             )
             conn.commit()
@@ -239,7 +239,7 @@ def log_flag_instructions(account_ids, flag_instruction, days_threshold=None):
                         """
                         INSERT INTO dormant_flags
                         (account_id, flag_instruction, flag_reason, flag_days, flagged_by, timestamp)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         """,
                         (
                             account_id,
@@ -312,7 +312,7 @@ def save_sql_query_to_history(natural_language_query, sql_query):
         # Insert the new query
         cursor.execute("""
                        INSERT INTO sql_query_history (natural_language_query, sql_query)
-                       VALUES (?, ?)
+                       VALUES (%s, %s)
                        """, (natural_language_query, sql_query))
 
         conn.commit()
@@ -390,7 +390,7 @@ def save_dormant_analysis_to_history(parameters, count):
         # Insert the new analysis
         cursor.execute("""
                        INSERT INTO dormant_analysis_history (parameters, count)
-                       VALUES (?, ?)
+                       VALUES (%s, %s)
                        """, (params_json, count))
 
         conn.commit()

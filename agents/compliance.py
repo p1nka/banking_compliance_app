@@ -149,10 +149,12 @@ def detect_internal_ledger_candidates(df):
         conn = get_db_connection()
         if conn:
             try:
-                with conn.cursor() as cursor:  # Use 'with' for cursor too
+                with conn.cursor() as cursor:
                     cursor.execute("SELECT account_id FROM dormant_ledger")
                     ids_in_ledger = [row[0] for row in cursor.fetchall()]
             except Exception as db_e:
+                # FIX: A failed SELECT does not require a rollback.
+                # Simply warn the user and proceed. The faulty rollback logic is removed.
                 st.sidebar.warning(f"Could not check dormant_ledger table: {db_e}. Proceeding without filtering.")
 
         if ids_in_ledger:
@@ -232,42 +234,17 @@ def log_flag_instructions(account_ids, agent_name, threshold_days):
         return False, "Database connection failed"
 
     try:
-        with conn.cursor() as cursor:  # Use 'with' for cursor
-            # For Azure SQL, INFORMATION_SCHEMA.TABLES is standard
+        with conn.cursor() as cursor:
             cursor.execute("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'dormant_flags'")
             table_exists = cursor.fetchone() is not None
 
             if not table_exists:
-                # Consider creating it if init_db somehow missed it or if running standalone
-                # For now, error out as per original logic
                 return False, "Error: 'dormant_flags' table not found in the database. Run schema initialization."
-
-            # For Azure SQL, to avoid inserting duplicates for a PRIMARY KEY (account_id),
-            # it's better to check existence first or use MERGE if supported and preferred.
-            # A simpler way for batch is to try insert and catch primary key violation, but that's per row.
-            # The SELECT ... WHERE NOT EXISTS is more common in SQLite.
-            # For Azure SQL, a common pattern is:
-            # IF NOT EXISTS (SELECT 1 FROM dormant_flags WHERE account_id = ?)
-            # BEGIN
-            #    INSERT INTO dormant_flags (account_id, flag_instruction, timestamp) VALUES (?, ?, ?)
-            # END
-            # This needs to be executed per row or adapted for batch.
-
-            # Simpler approach for this example (might log duplicates if account_id is not PK or Unique constraint is violated and not handled)
-            # Assuming 'account_id' is PRIMARY KEY in 'dormant_flags' as per schema.py
 
             insert_sql = """
                          INSERT INTO dormant_flags (account_id, flag_instruction, timestamp)
-                         VALUES (?, ?, ?) \
+                         VALUES (%s, %s, %s)
                          """
-            # To handle existing:
-            # MERGE dormant_flags AS target
-            # USING (VALUES (?, ?, ?)) AS source (account_id, flag_instruction, timestamp)
-            # ON target.account_id = source.account_id
-            # WHEN NOT MATCHED THEN
-            #     INSERT (account_id, flag_instruction, timestamp)
-            #     VALUES (source.account_id, source.flag_instruction, source.timestamp);
-            # This MERGE syntax is specific to SQL Server.
 
             timestamp_now = datetime.now()
             rows_inserted = 0
@@ -276,11 +253,10 @@ def log_flag_instructions(account_ids, agent_name, threshold_days):
             for acc_id in account_ids:
                 if pd.notna(acc_id) and str(acc_id).strip() != '':
                     try:
-                        # Check if exists first (safer for cross-db if MERGE isn't used)
-                        cursor.execute("SELECT 1 FROM dormant_flags WHERE account_id = ?", (str(acc_id),))
+                        cursor.execute("SELECT 1 FROM dormant_flags WHERE account_id = %s", (str(acc_id),))
                         if cursor.fetchone():
                             skipped_due_to_existence += 1
-                            continue  # Skip if already exists
+                            continue
 
                         cursor.execute(
                             insert_sql,
@@ -291,12 +267,17 @@ def log_flag_instructions(account_ids, agent_name, threshold_days):
                             )
                         )
                         rows_inserted += cursor.rowcount
-                    except pyodbc.IntegrityError:  # Catches PK violation if check above somehow misses (race condition)
-                        skipped_due_to_existence += 1
-                    except Exception as e_row:
-                        st.sidebar.warning(f"Skipping log for {acc_id} due to DB error: {e_row}")
 
-            conn.commit()
+                    except Exception as e_row:
+                        if "PRIMARY KEY constraint" in str(e_row):
+                            skipped_due_to_existence += 1
+                        else:
+                            st.sidebar.warning(f"Skipping log for {acc_id} due to DB error: {e_row}")
+
+            # FIX: Only commit if rows were actually inserted. This prevents the
+            # "Cannot commit transaction" error if no new data was added.
+            if rows_inserted > 0:
+                conn.commit()
 
             if skipped_due_to_existence > 0:
                 return True, f"Logged {rows_inserted} new unique accounts. {skipped_due_to_existence} were already in the flagging log or caused an error."
@@ -304,6 +285,17 @@ def log_flag_instructions(account_ids, agent_name, threshold_days):
                 return True, f"Logged {rows_inserted} unique accounts for flagging review!"
 
     except Exception as e:
+        # The original error happens before this block is reached. If an error occurs
+        # during the process (e.g., connection lost), a rollback is still a good idea.
+        # But we must handle the case where the connection is already closed.
+        if conn:
+            try:
+                conn.rollback()
+            except Exception as rollback_e:
+                # Avoid showing a secondary error if the rollback itself fails
+                st.sidebar.error(f"DB logging failed: {e}. Additionally, rollback failed: {rollback_e}")
+                return False, f"DB logging failed: {e}"
+
         return False, f"DB logging failed: {e}"
 
 
@@ -602,15 +594,15 @@ def run_all_compliance_checks(df, general_threshold_date, freeze_threshold_date,
                                           "message": "No unflagged candidates to log or Account_ID missing."}
 
     results["ledger_candidates_internal"]["df"], results["ledger_candidates_internal"]["count"], \
-    results["ledger_candidates_internal"]["desc"] = \
+        results["ledger_candidates_internal"]["desc"] = \
         detect_ledger_candidates(df_copy)
 
     results["statement_freeze_needed"]["df"], results["statement_freeze_needed"]["count"], \
-    results["statement_freeze_needed"]["desc"] = \
+        results["statement_freeze_needed"]["desc"] = \
         detect_freeze_candidates(df_copy, freeze_threshold_date)
 
     results["transfer_candidates_cb"]["df"], results["transfer_candidates_cb"]["count"], \
-    results["transfer_candidates_cb"]["desc"] = \
+        results["transfer_candidates_cb"]["desc"] = \
         detect_transfer_candidates_to_cb(df_copy)  # Relies on 'Expected_Transfer_to_CB_Due'
 
     results["fx_conversion_needed"]["df"], results["fx_conversion_needed"]["count"], results["fx_conversion_needed"][
@@ -622,11 +614,11 @@ def run_all_compliance_checks(df, general_threshold_date, freeze_threshold_date,
         detect_sdb_court_application_needed(df_copy)
 
     results["unclaimed_instruments_ledger"]["df"], results["unclaimed_instruments_ledger"]["count"], \
-    results["unclaimed_instruments_ledger"]["desc"] = \
+        results["unclaimed_instruments_ledger"]["desc"] = \
         detect_unclaimed_payment_instruments_ledger(df_copy)
 
     results["claims_processing_pending"]["df"], results["claims_processing_pending"]["count"], \
-    results["claims_processing_pending"]["desc"] = \
+        results["claims_processing_pending"]["desc"] = \
         detect_claim_processing_pending(df_copy)
 
     results["annual_cbuae_report"]["df"], results["annual_cbuae_report"]["count"], results["annual_cbuae_report"][
