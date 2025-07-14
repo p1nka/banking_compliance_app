@@ -102,7 +102,7 @@ class UploadedDataAnalyzer:
         return {"uploaded_data": datetime_cols} if datetime_cols else {}
 
     def execute_pandas_query(self, query: str) -> pd.DataFrame:
-        """Execute a pandas-based query on uploaded data."""
+        """Execute a pandas-based query on uploaded data - SILENT execution."""
         if self.data_df is None or self.data_df.empty:
             raise Exception("No uploaded data available")
 
@@ -120,31 +120,18 @@ class UploadedDataAnalyzer:
             # Execute the query (replace any hardcoded table names)
             cleaned_query = self._adapt_query_for_uploaded_data(query)
 
-            with st.status("🔍 Executing Query on Uploaded Data...", state="running", expanded=True) as status:
-                st.code(cleaned_query, language='sql')
-                start_time = datetime.now()
-
-                try:
-                    results_df = pd.read_sql_query(cleaned_query, conn)
-                    execution_time = (datetime.now() - start_time).total_seconds()
-
-                    status.update(
-                        label=f"✅ Query completed in {execution_time:.2f}s, found {len(results_df)} rows.",
-                        state="complete"
-                    )
-
-                    logger.info(f"Pandas query executed successfully. Rows: {len(results_df)}")
-
-                except Exception as e:
-                    execution_time = (datetime.now() - start_time).total_seconds()
-                    status.update(
-                        label=f"❌ Query failed after {execution_time:.2f}s",
-                        state="error"
-                    )
-                    raise Exception(f"Query execution failed: {str(e)}")
-
-                finally:
-                    conn.close()
+            # SILENT execution - no status display
+            start_time = datetime.now()
+            try:
+                results_df = pd.read_sql_query(cleaned_query, conn)
+                execution_time = (datetime.now() - start_time).total_seconds()
+                logger.info(f"Pandas query executed successfully. Rows: {len(results_df)}, Time: {execution_time:.2f}s")
+            except Exception as e:
+                execution_time = (datetime.now() - start_time).total_seconds()
+                logger.error(f"Query execution failed after {execution_time:.2f}s: {str(e)}")
+                raise Exception(f"Query execution failed: {str(e)}")
+            finally:
+                conn.close()
 
             return results_df
 
@@ -181,9 +168,7 @@ class UploadedDataAnalyzer:
             if "LIMIT" not in adapted_query.upper():
                 adapted_query += f" LIMIT {limit_val}"
 
-        logger.info(f"Original query: {query}")
         logger.info(f"Adapted query for SQLite: {adapted_query}")
-
         return adapted_query
 
     def get_schema_for_prompt(self) -> str:
@@ -248,59 +233,46 @@ class DatabaseSQLAnalyzer:
         return list(self.schema_info.keys())[0] if self.schema_info else None
 
     def execute_sql(self, query: str) -> pd.DataFrame:
-        """Executes a SQL query and returns a pandas DataFrame with robust datetime handling."""
+        """Executes a SQL query and returns a pandas DataFrame - SILENT execution."""
         if not self.connection:
             raise Exception("Database connection not available")
 
         cleaned_query = self._clean_and_validate_query(query)
         logger.info(f"Executing query: {cleaned_query}")
 
-        with st.status("🔍 Executing SQL Query...", state="running", expanded=True) as status:
-            st.code(cleaned_query, language='sql')
-            start_time = datetime.now()
+        # SILENT execution - no status display
+        start_time = datetime.now()
+        try:
+            # Get all datetime columns from database info
+            datetime_columns = self._get_datetime_columns_for_query(cleaned_query)
+            logger.info(f"Detected datetime columns: {datetime_columns}")
 
-            try:
-                # Get all datetime columns from database info
-                datetime_columns = self._get_datetime_columns_for_query(cleaned_query)
-                logger.info(f"Detected datetime columns: {datetime_columns}")
-
-                # Execute query with datetime parsing
-                if datetime_columns:
-                    results_df = pd.read_sql(
-                        cleaned_query,
-                        self.connection,
-                        parse_dates=datetime_columns
-                    )
-                else:
-                    results_df = pd.read_sql(cleaned_query, self.connection)
-
-                # Post-process datetime columns that might have been missed
-                results_df = self._post_process_datetime_columns(results_df)
-
-                execution_time = (datetime.now() - start_time).total_seconds()
-                status.update(
-                    label=f"✅ Query completed in {execution_time:.2f}s, found {len(results_df)} rows.",
-                    state="complete"
+            # Execute query with datetime parsing
+            if datetime_columns:
+                results_df = pd.read_sql(
+                    cleaned_query,
+                    self.connection,
+                    parse_dates=datetime_columns
                 )
+            else:
+                results_df = pd.read_sql(cleaned_query, self.connection)
 
-                logger.info(
-                    f"Query executed successfully. Rows: {len(results_df)}, Columns: {list(results_df.columns)}")
+            # Post-process datetime columns that might have been missed
+            results_df = self._post_process_datetime_columns(results_df)
 
-            except Exception as e:
-                execution_time = (datetime.now() - start_time).total_seconds()
-                status.update(
-                    label=f"❌ Query failed after {execution_time:.2f}s",
-                    state="error"
-                )
-                logger.error(f"SQL execution failed: {str(e)}")
-                raise Exception(f"SQL execution failed: {str(e)}")
+            execution_time = (datetime.now() - start_time).total_seconds()
+            logger.info(f"Query executed successfully. Rows: {len(results_df)}, Columns: {list(results_df.columns)}, Time: {execution_time:.2f}s")
 
-        # Save query to history
+        except Exception as e:
+            execution_time = (datetime.now() - start_time).total_seconds()
+            logger.error(f"SQL execution failed after {execution_time:.2f}s: {str(e)}")
+            raise Exception(f"SQL execution failed: {str(e)}")
+
+        # Save query to history (silent)
         try:
             save_sql_query_to_history("AI Assistant Query", cleaned_query, execution_time)
         except Exception as e:
             logger.warning(f"Could not save query to history: {e}")
-            st.warning(f"Could not save query to history: {e}")
 
         return results_df
 
@@ -409,7 +381,7 @@ class DatabaseSQLAnalyzer:
 
 
 class AI_Data_Assistant:
-    """A unified IA Chat Assistant that can query a database, generate insights, and create visualizations."""
+    """A unified AI assistant that can query a database, generate insights, and create visualizations."""
 
     def __init__(self, llm_model):
         self.llm_model = llm_model
@@ -540,7 +512,7 @@ BUSINESS RULES:
         return f"{dialect_rules}\n{schema_text}\n{business_rules}"
 
     def process_query(self, user_query: str) -> Tuple[str, Optional[pd.DataFrame]]:
-        """Main processing pipeline: NL -> SQL -> Data -> Insight -> (Hand off to viz)."""
+        """Main processing pipeline: NL -> SQL -> Data -> Insight -> (Hand off to viz) - SILENT processing."""
         try:
             # Re-determine data source in case it changed
             self.data_source = self._determine_data_source()
@@ -548,21 +520,19 @@ BUSINESS RULES:
             if self.data_source == "none":
                 return "❌ **No data available.** Please upload data or connect to a database first.", None
 
-            # Generate SQL
-            with st.spinner("🧠 Generating SQL..."):
-                sql_query = self._generate_sql(user_query)
-                logger.info(f"Generated SQL for {self.data_source} source: {sql_query}")
+            # Generate SQL (silent)
+            sql_query = self._generate_sql(user_query)
+            logger.info(f"Generated SQL for {self.data_source} source: {sql_query}")
 
-            # Execute SQL based on data source
+            # Execute SQL based on data source (silent)
             if self.data_source == "uploaded":
                 query_results = self.uploaded_analyzer.execute_pandas_query(sql_query)
             else:
                 query_results = self.sql_analyzer.execute_sql(sql_query)
 
-            # Generate insights
+            # Generate insights (silent)
             if not query_results.empty:
-                with st.spinner("💡 Generating insights..."):
-                    text_insights = self._generate_text_insights(user_query, query_results)
+                text_insights = self._generate_text_insights(user_query, query_results)
             else:
                 text_insights = "The query ran successfully but returned no data. Your criteria might be too specific, or there might be no records matching your request."
 
@@ -618,10 +588,11 @@ BUSINESS RULES:
 
 
 def display_chat_interface(llm_model):
-    """Renders the main Streamlit chat interface for the IA Chat Assistant."""
+    """Renders the main Streamlit chat interface for the AI Data Assistant."""
     try:
         if "assistant" not in st.session_state:
-            with st.spinner("🚀 Initializing AI Assistant..."):
+            # SILENT initialization - only show spinner
+            with st.spinner("🤖 Initializing AI Assistant..."):
                 st.session_state.assistant = AI_Data_Assistant(llm_model)
 
         assistant = st.session_state.assistant
@@ -658,7 +629,7 @@ def display_chat_interface(llm_model):
         data_source_msg = "uploaded data" if current_data_source == "uploaded" else "database"
         st.session_state[SESSION_CHAT_MESSAGES] = [{
             "role": "assistant",
-            "content": f"Hello! I'm your IA Chat Assistant. I can help you analyze your {data_source_msg} by answering questions in natural language. What would you like to know about your data?"
+            "content": f"Hello! I'm your AI Data Assistant. I can help you analyze your {data_source_msg} by answering questions in natural language. What would you like to know about your data?"
         }]
 
     # Display Chat History
@@ -712,7 +683,9 @@ def display_chat_interface(llm_model):
         # Process and add assistant response
         with st.chat_message("assistant"):
             try:
-                response_text, results_df = assistant.process_query(prompt)
+                # Show only a simple processing message
+                with st.spinner("🔍 Analyzing your data..."):
+                    response_text, results_df = assistant.process_query(prompt)
 
                 # Display the response
                 st.markdown(response_text)
