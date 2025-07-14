@@ -492,7 +492,7 @@ def render_app_modes():
         [
             "🏦 Dormant Account Analyzer",
             "🔒 Dormant Compliance Analyzer",
-            "💬 Chatbot Only",
+            "💬 IA Chat",
             "🔍 SQL Bot"
         ],
         key="app_mode_selector"
