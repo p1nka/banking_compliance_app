@@ -409,7 +409,7 @@ class DatabaseSQLAnalyzer:
 
 
 class AI_Data_Assistant:
-    """A unified AI assistant that can query a database, generate insights, and create visualizations."""
+    """A unified IA Chat Assistant that can query a database, generate insights, and create visualizations."""
 
     def __init__(self, llm_model):
         self.llm_model = llm_model
@@ -618,7 +618,7 @@ BUSINESS RULES:
 
 
 def display_chat_interface(llm_model):
-    """Renders the main Streamlit chat interface for the AI Data Assistant."""
+    """Renders the main Streamlit chat interface for the IA Chat Assistant."""
     try:
         if "assistant" not in st.session_state:
             with st.spinner("🚀 Initializing AI Assistant..."):
@@ -658,7 +658,7 @@ def display_chat_interface(llm_model):
         data_source_msg = "uploaded data" if current_data_source == "uploaded" else "database"
         st.session_state[SESSION_CHAT_MESSAGES] = [{
             "role": "assistant",
-            "content": f"Hello! I'm your AI Data Assistant. I can help you analyze your {data_source_msg} by answering questions in natural language. What would you like to know about your data?"
+            "content": f"Hello! I'm your IA Chat Assistant. I can help you analyze your {data_source_msg} by answering questions in natural language. What would you like to know about your data?"
         }]
 
     # Display Chat History
