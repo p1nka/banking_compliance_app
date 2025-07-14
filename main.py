@@ -225,7 +225,7 @@ if check_password():
             ui.dormant_ui.render_dormant_analyzer(df, report_date_str, llm, dormant_flags_history_df)   # NEW
         elif app_mode == "🔒 Dormant Compliance Analyzer":
             ui.compliance_ui.render_compliance_analyzer(df,agent_name_input, llm)
-        elif app_mode == "💬 Chatbot Only":
+        elif app_mode == "💬 IA Chat":
             render_chatbot(llm)
         elif app_mode == "🔍 SQL Bot":
             render_sqlbot(llm)
