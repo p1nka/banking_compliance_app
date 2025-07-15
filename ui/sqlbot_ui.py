@@ -173,7 +173,7 @@ Generate ONLY the SQL query without any explanation, markdown formatting, or ext
 def enhanced_generate_sql_from_nl(nl_query: str, schema_text: str, llm, is_advanced_mode: bool = False) -> Optional[
     str]:
     """
-    Enhanced SQL generation with strict duplicate prevention.
+    SQL BOT
     """
     try:
         enhanced_prompt_template = create_datetime_aware_prompt()
