@@ -9,6 +9,7 @@ try:
     from langchain_core.prompts import PromptTemplate
     from langchain_core.messages import HumanMessage, AIMessage
     from langchain_core.output_parsers import StrOutputParser
+
     # Add any other required Langchain components here if needed later
 
     LANGCHAIN_AVAILABLE = True
@@ -17,6 +18,7 @@ except ImportError:
         "Langchain/Groq libraries not found. AI features will be disabled. Install with: pip install langchain langchain-groq"
     )
     LANGCHAIN_AVAILABLE = False
+
 
     # Define dummy classes/functions if Langchain is not available to avoid NameErrors later
     # These dummies mimic the basic interface needed by the rest of the app.
@@ -31,6 +33,7 @@ except ImportError:
             dummy_response.content = "AI features are disabled because Langchain/Groq libraries are not installed."
             # print(f"Dummy ChatGroq invoked, returning: {dummy_response.content}") # Optional debug
             return dummy_response
+
 
     class PromptTemplate:
         def __init__(self):
@@ -67,15 +70,18 @@ except ImportError:
 
             return DummyPrompt(text, input_variables)
 
+
     class HumanMessage:
         def __init__(self, content):
             # print(f"Dummy HumanMessage created with content: {content[:50]}...") # Optional debug
             self.content = content  # Basic init for dummy
 
+
     class AIMessage:
         def __init__(self, content):
             # print(f"Dummy AIMessage created with content: {content[:50]}...") # Optional debug
             self.content = content  # Basic init for dummy
+
 
     class StrOutputParser:
         def __init__(self):
@@ -135,20 +141,22 @@ def load_llm():
             # Adding system instruction for more predictable "API key is valid" response
             test_message = [
                 HumanMessage(content="Say only 'API key is valid'. Do not include any other text.")
-                ]
+            ]
             # The dummy invoke returns an object with .content, so this structure works for both
             test_response = llm_instance.invoke(test_message)
             # Check the response content, allowing for slight variations in casing or whitespace
-            if test_response is not None and hasattr(test_response, 'content') and 'api key is valid' in str(test_response.content).strip().lower():
-                 st.sidebar.success("✅ AI Assistant Loaded!")
-                 return llm_instance
+            if test_response is not None and hasattr(test_response, 'content') and 'api key is valid' in str(
+                    test_response.content).strip().lower():
+                st.sidebar.success("✅ AI Assistant Loaded!")
+                return llm_instance
             else:
-                 # This might catch cases where the API call succeeds but the model doesn't follow instructions
-                 st.warning("Groq API test call did not return expected response. API key might be rate-limited, model issue, or a non-critical error.")
-                 st.sidebar.warning("⚠️ AI Assistant Load Warning: Test failed.")
-                 # Decide whether to return the instance anyway or None. Returning the instance might still allow some functionality. Let's return it.
-                 st.info("Attempting to proceed with AI features, but reliability might be affected.")
-                 return llm_instance # Return instance despite test warning
+                # This might catch cases where the API call succeeds but the model doesn't follow instructions
+                st.warning(
+                    "Groq API test call did not return expected response. API key might be rate-limited, model issue, or a non-critical error.")
+                st.sidebar.warning("⚠️ AI Assistant Load Warning: Test failed.")
+                # Decide whether to return the instance anyway or None. Returning the instance might still allow some functionality. Let's return it.
+                st.info("Attempting to proceed with AI features, but reliability might be affected.")
+                return llm_instance  # Return instance despite test warning
         except Exception as test_e:
             # Catch specific Groq errors if possible, or general Exception
             error_message = str(test_e).lower()
@@ -156,15 +164,15 @@ def load_llm():
                 st.error("🚨 Invalid Groq API Key. Please check your API key and try again.")
                 st.sidebar.error("⚠️ AI Assistant Disabled: Invalid API Key.")
             elif "rate limit" in error_message:
-                 st.error("🚨 Groq API rate limit exceeded. Please wait a moment and try again.")
-                 st.sidebar.error("⚠️ AI Assistant Disabled: Rate Limited.")
+                st.error("🚨 Groq API rate limit exceeded. Please wait a moment and try again.")
+                st.sidebar.error("⚠️ AI Assistant Disabled: Rate Limited.")
             elif "network" in error_message or "timeout" in error_message or "connection" in error_message:
-                 st.error(f"🚨 Network or Timeout error contacting Groq API: {test_e}")
-                 st.sidebar.error("⚠️ AI Assistant Disabled: Network Error.")
+                st.error(f"🚨 Network or Timeout error contacting Groq API: {test_e}")
+                st.sidebar.error("⚠️ AI Assistant Disabled: Network Error.")
             else:
                 st.error(f"🚨 Error during Groq test call: {test_e}")
                 st.sidebar.error("⚠️ AI Assistant Disabled: Test Error.")
-            return None # Return None on test failure
+            return None  # Return None on test failure
 
     except Exception as e:
         # Catch errors during client initialization (e.g., invalid model name)
@@ -172,6 +180,7 @@ def load_llm():
         st.info("Please verify your GROQ_API_KEY value and model name.")
         st.sidebar.error("⚠️ AI Assistant Disabled: Initialization Failed.")
         return None
+
 
 # --- Helper Function to Invoke LLM ---
 def _invoke_llm(llm, prompt_template, inputs):
@@ -188,7 +197,7 @@ def _invoke_llm(llm, prompt_template, inputs):
         str: The generated text from the LLM, or an error message string.
     """
     if llm is None:
-         # This case should ideally be handled by the caller, but good practice
+        # This case should ideally be handled by the caller, but good practice
         return "Error: LLM is not loaded."
 
     try:
@@ -213,6 +222,148 @@ def _invoke_llm(llm, prompt_template, inputs):
         return f"Sorry, an error occurred while generating the AI response: {e}"
 
 
+# --- Enhanced Dataset Information Preparation ---
+def prepare_dataset_info_for_ai(df, analysis_type, sample_size=15):
+    """
+    Prepare comprehensive dataset information for AI analysis.
+
+    Args:
+        df: Full DataFrame
+        analysis_type: Type of analysis being performed
+        sample_size: Number of rows to sample for detailed analysis
+
+    Returns:
+        tuple: (sample_data_csv, full_dataset_info_dict)
+    """
+    # Get sample data
+    if len(df) <= sample_size:
+        sample_df = df.copy()
+        actual_sample_size = len(df)
+    else:
+        sample_df = df.sample(n=sample_size, random_state=42)
+        actual_sample_size = sample_size
+
+    # Convert sample to CSV string
+    sample_data_csv = sample_df.to_csv(index=False)
+
+    # Prepare comprehensive dataset information
+    full_dataset_info = {
+        'total_records': len(df),
+        'total_columns': len(df.columns),
+        'column_names': df.columns.tolist(),
+        'sample_size': actual_sample_size,
+        'analysis_type': analysis_type,
+        'data_types': df.dtypes.to_dict(),
+        'memory_usage': f"{df.memory_usage(deep=True).sum() / 1024 / 1024:.2f} MB"
+    }
+
+    # Add column-specific information
+    numeric_columns = df.select_dtypes(include=['number']).columns.tolist()
+    date_columns = df.select_dtypes(include=['datetime']).columns.tolist()
+    text_columns = df.select_dtypes(include=['object']).columns.tolist()
+
+    full_dataset_info.update({
+        'numeric_columns': numeric_columns,
+        'date_columns': date_columns,
+        'text_columns': text_columns,
+        'numeric_column_count': len(numeric_columns),
+        'date_column_count': len(date_columns),
+        'text_column_count': len(text_columns)
+    })
+
+    return sample_data_csv, full_dataset_info
+
+
+# --- Enhanced AI Insight Generation ---
+def generate_enhanced_ai_insights(llm, df, analysis_type, agent_name):
+    """
+    Generate comprehensive AI insights with accurate dataset information.
+
+    Args:
+        llm: LLM instance
+        df: Complete DataFrame
+        analysis_type: Type of analysis (e.g., "FD: Fixed Deposit Inactivity")
+        agent_name: Name of the analysis agent
+
+    Returns:
+        dict: Dictionary containing all AI insights
+    """
+    if llm is None:
+        return {
+            'observations': get_fallback_response('observation'),
+            'trends': get_fallback_response('trend'),
+            'narration': get_fallback_response('narration'),
+            'actions': get_fallback_response('action')
+        }
+
+    try:
+        # Prepare data with accurate context
+        sample_data_csv, full_dataset_info = prepare_dataset_info_for_ai(
+            df, analysis_type, sample_size=15  # Slightly larger sample
+        )
+
+        # Generate enhanced observations
+        observations = analyze_data_observation_enhanced(llm, sample_data_csv, full_dataset_info)
+
+        # Generate enhanced trends
+        trends = analyze_data_trend_enhanced(llm, sample_data_csv, full_dataset_info)
+
+        # Generate narration and actions (existing functions work fine)
+        narration = generate_narration(llm, observations, trends)
+        actions = generate_actions(llm, observations, trends)
+
+        return {
+            'observations': observations,
+            'trends': trends,
+            'narration': narration,
+            'actions': actions,
+            'dataset_info': full_dataset_info
+        }
+
+    except Exception as e:
+        error_msg = f"Error generating AI insights: {str(e)}"
+        return {
+            'observations': error_msg,
+            'trends': error_msg,
+            'narration': error_msg,
+            'actions': error_msg
+        }
+
+
+def analyze_data_observation_enhanced(llm, data_sample, full_dataset_info):
+    """
+    Enhanced function that provides accurate dataset information to AI.
+
+    Args:
+        llm: The LLM instance
+        data_sample: Sample data as CSV string (for pattern analysis)
+        full_dataset_info: Dictionary with complete dataset information
+    """
+    prompt = PromptTemplate.from_template(ENHANCED_OBSERVATION_PROMPT)
+    inputs = {
+        "data_sample": data_sample,
+        "total_records": full_dataset_info.get('total_records', 0),
+        "total_columns": full_dataset_info.get('total_columns', 0),
+        "column_names": full_dataset_info.get('column_names', []),
+        "sample_size": full_dataset_info.get('sample_size', 0)
+    }
+    return _invoke_llm(llm, prompt, inputs)
+
+
+def analyze_data_trend_enhanced(llm, data_sample, full_dataset_info):
+    """
+    Enhanced trend analysis with accurate dataset context.
+    """
+    prompt = PromptTemplate.from_template(ENHANCED_TREND_PROMPT)
+    inputs = {
+        "data_sample": data_sample,
+        "total_records": full_dataset_info.get('total_records', 0),
+        "analysis_type": full_dataset_info.get('analysis_type', 'Unknown'),
+        "sample_size": full_dataset_info.get('sample_size', 0)
+    }
+    return _invoke_llm(llm, prompt, inputs)
+
+
 # --- Task-Specific Functions using the LLM ---
 
 # These functions assume they are called *only* when llm is not None.
@@ -224,11 +375,13 @@ def generate_sql(llm, schema, question):
     inputs = {"schema": schema, "question": question}
     return _invoke_llm(llm, prompt, inputs)
 
+
 def explain_sql(llm, schema, sql_query):
     """Explains a SQL query using the LLM."""
     prompt = PromptTemplate.from_template(SQL_EXPLANATION_PROMPT)
     inputs = {"schema": schema, "sql_query": sql_query}
     return _invoke_llm(llm, prompt, inputs)
+
 
 def summarize_dormant(llm, analysis_details):
     """Generates a summary of dormant account analysis using the LLM."""
@@ -236,17 +389,62 @@ def summarize_dormant(llm, analysis_details):
     inputs = {"analysis_details": analysis_details}
     return _invoke_llm(llm, prompt, inputs)
 
+
 def summarize_compliance(llm, compliance_details):
     """Generates a summary of compliance findings using the LLM."""
     prompt = PromptTemplate.from_template(COMPLIANCE_SUMMARY_PROMPT)
     inputs = {"compliance_details": compliance_details}
     return _invoke_llm(llm, prompt, inputs)
 
+
 def analyze_data_observation(llm, data):
-    """Generates observations based on sample data using the LLM."""
+    """
+    Enhanced observation function that tries to provide accurate dataset context.
+    Backwards compatible with existing code.
+    """
+    if llm is None:
+        return get_fallback_response('observation')
+
+    try:
+        # Try to count rows and columns from CSV string
+        lines = data.strip().split('\n')
+        if len(lines) > 1:
+            headers = lines[0].split(',')
+            data_rows = len(lines) - 1  # Subtract header row
+
+            # Create a more accurate prompt
+            enhanced_prompt = f"""You are analyzing a dataset sample. Here's what you should know:
+
+**SAMPLE INFORMATION:**
+- Sample shows: {data_rows} records
+- Columns detected: {len(headers)} columns
+- Column names: {', '.join(headers)}
+
+**IMPORTANT:** This appears to be a SAMPLE of a larger dataset. Your observations should note this is sample data and may represent a much larger dataset.
+
+**SAMPLE DATA:**
+{data}
+
+Provide observations about the data structure, patterns, and data quality visible in this sample:
+
+Observations:"""
+
+            prompt = PromptTemplate.from_template(enhanced_prompt)
+            inputs = {}  # No template variables needed as they're embedded in the prompt
+            return _invoke_llm(llm, prompt, inputs)
+        else:
+            return analyze_data_observation_original(llm, data)
+
+    except Exception as e:
+        return analyze_data_observation_original(llm, data)
+
+
+def analyze_data_observation_original(llm, data):
+    """Original observation function as fallback"""
     prompt = PromptTemplate.from_template(OBSERVATION_PROMPT)
     inputs = {"data": data}
     return _invoke_llm(llm, prompt, inputs)
+
 
 def analyze_data_trend(llm, data):
     """Identifies trends based on sample data using the LLM."""
@@ -254,17 +452,21 @@ def analyze_data_trend(llm, data):
     inputs = {"data": data}
     return _invoke_llm(llm, prompt, inputs)
 
+
 def generate_narration(llm, observation, trend):
     """Generates an executive summary based on observations and trends using the LLM."""
     prompt = PromptTemplate.from_template(NARRATION_PROMPT)
     inputs = {"observation": observation, "trend": trend}
     return _invoke_llm(llm, prompt, inputs)
 
+
 def generate_actions(llm, observation, trend):
     """Suggests recommended actions based on observations and trends using the LLM."""
     prompt = PromptTemplate.from_template(ACTION_PROMPT)
     inputs = {"observation": observation, "trend": trend}
     return _invoke_llm(llm, prompt, inputs)
+
+
 # Function to create a fallback response when LLM is not available
 def get_fallback_response(prompt_type, inputs=None):
     """
@@ -330,6 +532,7 @@ def clean_sql_query(sql_text):
 
     return sql_text
 
+
 # --- Common prompts for different use cases ---
 # These remain the same as they define the instructions for the LLM
 DORMANT_SUMMARY_PROMPT = """Act as a Senior Compliance Analyst AI. You have analyzed a dataset of banking accounts.
@@ -361,6 +564,49 @@ TREND_PROMPT = """You are a data strategist. Given the following sample data fro
 
 Sample Data (CSV):
 {data}
+
+Trends and Findings:"""
+
+# Enhanced prompts with accurate dataset context
+ENHANCED_OBSERVATION_PROMPT = """You are a senior bank analyst. You are analyzing a dataset with the following characteristics:
+
+**COMPLETE DATASET INFORMATION:**
+- Total Records: {total_records:,} records
+- Total Columns: {total_columns} columns
+- Column Names: {column_names}
+
+**SAMPLE DATA FOR PATTERN ANALYSIS:**
+Below is a sample of {sample_size} records from the {total_records:,} total records for pattern analysis:
+
+{data_sample}
+
+**IMPORTANT:** The sample above shows only {sample_size} records for analysis purposes, but your observations should reference the COMPLETE dataset of {total_records:,} records with {total_columns} columns.
+
+Please provide key observations about the dataset structure, common values, patterns, and data quality. Format your response with clear sections and bullet points.
+
+Your observations should be based on the complete dataset size ({total_records:,} records) while using the sample data to identify patterns.
+
+Observations:"""
+
+ENHANCED_TREND_PROMPT = """You are a data strategist analyzing banking compliance data. Here's the dataset context:
+
+**DATASET CONTEXT:**
+- Analysis Type: {analysis_type}
+- Total Records: {total_records:,} records
+- Sample Size Analyzed: {sample_size} records
+
+**SAMPLE DATA FOR TREND ANALYSIS:**
+{data_sample}
+
+Based on the sample patterns from this {total_records:,}-record dataset, identify potential trends, risk patterns, and significant findings relevant to compliance or operational risk.
+
+**IMPORTANT:** Your analysis should reflect the scale of {total_records:,} total records, not just the {sample_size} sample records shown.
+
+Focus on:
+- Risk concentration patterns
+- Compliance trend indicators  
+- Operational efficiency insights
+- Customer behavior patterns
 
 Trends and Findings:"""
 
@@ -407,8 +653,8 @@ Database Schema:
 SQL Query:
 ```sql
 {sql_query}
-Use code with caution.
-Python
+```
+
 Explanation:"""
 
 # Add the advanced SQL version of the prompt
@@ -438,17 +684,6 @@ Database Schema (Azure SQL):
 User question: {question}
 
 T-SQL Query:"""
-
-SQL_EXPLANATION_PROMPT = """You are a data analyst explaining an SQL query. Provide a clear, concise explanation of what the following T-SQL query does, referencing the provided database schema.
-
-Database Schema:
-{schema}
-
-SQL Query:
-```sql
-{sql_query}
-Explanation:
-"""
 
 ADVANCED_SQL_EXPLANATION_PROMPT = """You are a senior data engineer explaining a complex SQL query. Provide a detailed, step-by-step explanation of what the following advanced T-SQL query does, referencing the provided database schema.
 Break down the query by its components:
