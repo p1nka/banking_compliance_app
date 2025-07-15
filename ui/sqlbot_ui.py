@@ -1271,7 +1271,7 @@ def show_example_queries():
 
 def render_sqlbot(llm):
     """Main function to render the SQL Bot interface."""
-    st.title("🤖 Advanced SQL Bot with Duplicate Column Protection")
+    st.title("🤖 SQL Bot ")
     st.write(
         "Ask questions about your data in natural language. The bot will generate and execute SQL queries with intelligent visualizations.")
 
