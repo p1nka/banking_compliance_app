@@ -42,11 +42,11 @@ on:
   workflow_dispatch:
 
 env:
-  ACR_RESOURCE_GROUP: agent123_group
+  ACR_RESOURCE_GROUP: banking_compliance
   AZURE_CONTAINER_REGISTRY: agent123
   CONTAINER_NAME: image-workflow-1747992867101
   CLUSTER_NAME: agent123
-  CLUSTER_RESOURCE_GROUP: agent123_group
+  CLUSTER_RESOURCE_GROUP: banking_compliance
   CLUSTER_RESOURCE_TYPE: Microsoft.ContainerService/managedClusters
   DOCKER_FILE: ./Dockerfile
   BUILD_CONTEXT_PATH: ./
