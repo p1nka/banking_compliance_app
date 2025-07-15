@@ -5,6 +5,39 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 
+def fix_duplicate_columns(df):
+    """
+    Fix duplicate column names by adding suffixes.
+    """
+    if df.empty:
+        return df
+
+    # Create a copy to avoid modifying the original
+    df = df.copy()
+
+    # Get column names
+    columns = list(df.columns)
+
+    # Check for duplicates
+    if len(columns) != len(set(columns)):
+        # There are duplicates, fix them
+        new_columns = []
+        column_counts = {}
+
+        for col in columns:
+            if col in column_counts:
+                column_counts[col] += 1
+                new_columns.append(f"{col}_{column_counts[col]}")
+            else:
+                column_counts[col] = 0
+                new_columns.append(col)
+
+        df.columns = new_columns
+        print(f"Fixed duplicate columns: {columns} → {new_columns}")  # Debug print
+
+    return df
+
+
 def generate_plot(llm_output, current_data, column_mapping=None):
     """
     Generate a plotly chart based on LLM output and return both the chart object and response text.
@@ -18,6 +51,9 @@ def generate_plot(llm_output, current_data, column_mapping=None):
         tuple: (chart, response_text) where chart is a plotly figure or None if error
     """
     try:
+        # Fix duplicate columns first
+        current_data = fix_duplicate_columns(current_data)
+
         plot_type = llm_output.get("plot_type")
         x_col = llm_output.get("x_column")
         y_col = llm_output.get("y_column")
@@ -120,30 +156,248 @@ def generate_plot(llm_output, current_data, column_mapping=None):
 
 def create_insights_chart(data, labels=None, values=None, chart_type='pie', title=None):
     """
-    Create a simple chart for analytics insights.
+    Create a chart for analytics insights with proper handling of pre-aggregated data and hover information.
     """
     try:
+        # Fix duplicate columns first
+        data = fix_duplicate_columns(data)
+
         if chart_type == 'pie' and labels:
-            counts = data[labels].value_counts().reset_index()
-            counts.columns = [labels, 'count']
-            fig = px.pie(counts, names=labels, values='count', title=title)
-            return fig
-        elif chart_type == 'bar' and labels:
-            if values:
-                fig = px.bar(data, x=labels, y=values, title=title)
+            # Check if we have a pre-aggregated values column
+            if values and values in data.columns:
+                # Data is already aggregated (e.g., from GROUP BY query)
+                # Filter out zero or negative values for pie charts
+                filtered_data = data[data[values] > 0] if data[values].dtype in ['int64', 'float64'] else data
+                if filtered_data.empty:
+                    return None
+                fig = px.pie(
+                    filtered_data,
+                    names=labels,
+                    values=values,
+                    title=title,
+                    hover_data=[values]  # Show values on hover
+                )
+                # Customize hover template to show actual numbers
+                fig.update_traces(
+                    hovertemplate="<b>%{label}</b><br>" +
+                                  f"{values}: %{{value}}<br>" +
+                                  "Percentage: %{percent}<br>" +
+                                  "<extra></extra>"
+                )
             else:
+                # Need to count occurrences for raw data
                 counts = data[labels].value_counts().reset_index()
                 counts.columns = [labels, 'count']
-                fig = px.bar(counts, x=labels, y='count', title=title)
+                fig = px.pie(
+                    counts,
+                    names=labels,
+                    values='count',
+                    title=title,
+                    hover_data=['count']
+                )
+                fig.update_traces(
+                    hovertemplate="<b>%{label}</b><br>" +
+                                  "Count: %{value}<br>" +
+                                  "Percentage: %{percent}<br>" +
+                                  "<extra></extra>"
+                )
             return fig
+
+        elif chart_type == 'bar':
+            if values and values in data.columns:
+                # Use provided values column (pre-aggregated data)
+                # Ensure categorical data is on x-axis, numerical on y-axis
+                fig = px.bar(
+                    data,
+                    x=labels,
+                    y=values,
+                    title=title,
+                    hover_data=[values]
+                )
+                # Customize hover template
+                fig.update_traces(
+                    hovertemplate="<b>%{x}</b><br>" +
+                                  f"{values}: %{{y:,.0f}}<br>" +
+                                  "<extra></extra>"
+                )
+                y_title = values
+            else:
+                # Count occurrences for raw data
+                if pd.api.types.is_numeric_dtype(data[labels]):
+                    # If labels column is numeric, treat it as categorical for better visualization
+                    # Convert to string to treat as categories
+                    data_copy = data.copy()
+                    data_copy[labels] = data_copy[labels].astype(str)
+                    counts = data_copy[labels].value_counts().reset_index()
+                    counts.columns = [labels, 'count']
+                else:
+                    counts = data[labels].value_counts().reset_index()
+                    counts.columns = [labels, 'count']
+
+                fig = px.bar(
+                    counts,
+                    x=labels,
+                    y='count',
+                    title=title,
+                    hover_data=['count']
+                )
+                fig.update_traces(
+                    hovertemplate="<b>%{x}</b><br>" +
+                                  "Count: %{y:,.0f}<br>" +
+                                  "<extra></extra>"
+                )
+                y_title = 'Count'
+
+            # Improve bar chart appearance
+            fig.update_layout(
+                xaxis_title=labels if labels else 'Category',
+                yaxis_title=y_title,
+                showlegend=False,
+                xaxis={'categoryorder': 'total descending'}  # Sort bars by value
+            )
+            return fig
+
         elif chart_type == 'histogram' and labels:
-            fig = px.histogram(data, x=labels, title=title)
+            # Check if we should treat this as categorical instead of continuous
+            unique_vals = data[labels].nunique()
+            total_rows = len(data)
+
+            if unique_vals <= 20 and unique_vals < total_rows * 0.1:
+                # Treat as categorical - create a bar chart instead
+                data_copy = data.copy()
+                data_copy[labels] = data_copy[labels].astype(str)
+                counts = data_copy[labels].value_counts().reset_index()
+                counts.columns = [labels, 'count']
+                counts = counts.sort_values(labels)  # Sort by category name
+
+                fig = px.bar(
+                    counts,
+                    x=labels,
+                    y='count',
+                    title=title.replace('Distribution', 'Count by Value'),
+                )
+                fig.update_traces(
+                    hovertemplate="<b>%{x}</b><br>" +
+                                  "Count: %{y:,.0f}<br>" +
+                                  "<extra></extra>"
+                )
+                fig.update_layout(
+                    xaxis_title=f"{labels} (Values)",
+                    yaxis_title='Count',
+                    showlegend=False
+                )
+            else:
+                # True histogram for continuous data
+                fig = px.histogram(data, x=labels, title=title, nbins=min(30, unique_vals))
+                fig.update_traces(
+                    hovertemplate="<b>%{x}</b><br>" +
+                                  "Count: %{y:,.0f}<br>" +
+                                  "<extra></extra>"
+                )
+                fig.update_layout(
+                    xaxis_title=labels,
+                    yaxis_title='Frequency'
+                )
             return fig
+
+        elif chart_type == 'line' and labels and values:
+            fig = px.line(data, x=labels, y=values, title=title, markers=True)
+            fig.update_traces(
+                hovertemplate="<b>%{x}</b><br>" +
+                              f"{values}: %{{y:,.2f}}<br>" +
+                              "<extra></extra>"
+            )
+            return fig
+
+        elif chart_type == 'scatter' and labels and values:
+            fig = px.scatter(data, x=labels, y=values, title=title)
+            fig.update_traces(
+                hovertemplate="<b>%{x}</b><br>" +
+                              f"{values}: %{{y:,.2f}}<br>" +
+                              "<extra></extra>"
+            )
+            return fig
+
         else:
             return None
     except Exception as e:
-        st.error(f"Error creating chart: {e}")
+        print(f"Error creating chart: {e}")  # Debug print
         return None
+
+
+def smart_detect_chart_type(results_df: pd.DataFrame):
+    """
+    Intelligently detect the best chart type based on query results structure.
+    RULE: Categorical columns on X-axis, Numerical columns on Y-axis for better readability.
+    """
+    if results_df.empty:
+        return None, None, None, None
+
+    # IMPORTANT: Fix duplicate columns FIRST before any analysis
+    results_df = fix_duplicate_columns(results_df)
+
+    columns = list(results_df.columns)
+
+    # Identify column types
+    numeric_cols = results_df.select_dtypes(include=['number']).columns.tolist()
+    categorical_cols = results_df.select_dtypes(include=['object', 'category']).columns.tolist()
+    date_cols = [col for col in results_df.columns if pd.api.types.is_datetime64_any_dtype(results_df[col])]
+
+    # Filter categorical columns (avoid IDs and high cardinality)
+    good_categorical_cols = [
+        col for col in categorical_cols
+        if not col.lower().endswith(('_id', 'id')) and 1 < results_df[col].nunique() <= 25
+    ]
+
+    # Filter numeric columns (avoid ID-like columns)
+    good_numeric_cols = [
+        col for col in numeric_cols
+        if not col.lower().endswith(('_id', 'id'))
+    ]
+
+    # PRIORITY 1: GROUP BY results (categorical + numeric columns)
+    if good_categorical_cols and good_numeric_cols:
+        cat_col = good_categorical_cols[0]  # X-axis (categorical)
+        num_col = good_numeric_cols[0]  # Y-axis (numerical)
+
+        # Choose chart type based on number of categories
+        if results_df[cat_col].nunique() <= 8:
+            return 'pie', cat_col, num_col, f"Distribution of {num_col} by {cat_col}"
+        else:
+            return 'bar', cat_col, num_col, f"{num_col} by {cat_col}"
+
+    # PRIORITY 2: Time series data (date + numeric)
+    elif date_cols and good_numeric_cols:
+        return 'line', date_cols[0], good_numeric_cols[0], f"{good_numeric_cols[0]} over time"
+
+    # PRIORITY 3: Two numeric columns - scatter plot
+    elif len(good_numeric_cols) >= 2:
+        return 'scatter', good_numeric_cols[0], good_numeric_cols[
+            1], f"{good_numeric_cols[1]} vs {good_numeric_cols[0]}"
+
+    # PRIORITY 4: Single categorical column - count occurrences
+    elif good_categorical_cols:
+        cat_col = good_categorical_cols[0]
+        if results_df[cat_col].nunique() <= 8:
+            return 'pie', cat_col, None, f"Distribution of {cat_col}"
+        else:
+            return 'bar', cat_col, None, f"Count by {cat_col}"
+
+    # PRIORITY 5: Single numeric column - create bins/ranges for better visualization
+    elif good_numeric_cols:
+        num_col = good_numeric_cols[0]
+
+        # Check if the numeric data has reasonable distribution for histogram
+        unique_values = results_df[num_col].nunique()
+        total_rows = len(results_df)
+
+        # If too few unique values relative to total rows, treat as categorical
+        if unique_values <= 20 and unique_values < total_rows * 0.1:
+            return 'bar', num_col, None, f"Distribution of {num_col} values"
+        else:
+            return 'histogram', num_col, None, f"Distribution of {num_col}"
+
+    return None, None, None, None
 
 
 def auto_visualize(results_df: pd.DataFrame):
@@ -155,8 +409,57 @@ def auto_visualize(results_df: pd.DataFrame):
         st.info("💡 No data available for visualization.")
         return
 
+    # Fix duplicate columns first
+    try:
+        results_df = fix_duplicate_columns(results_df)
+    except Exception as e:
+        st.error(f"Error fixing column names: {e}")
+        return
+
     st.subheader("📊 Automatic Visualizations & Insights")
 
+    # Debug information to help understand the data structure
+    with st.expander("🔍 Data Structure Debug Info"):
+        st.write("**DataFrame Shape:**", results_df.shape)
+        st.write("**Column Names:**", list(results_df.columns))
+        st.write("**Column Types:**")
+        for col in results_df.columns:
+            st.write(f"- {col}: {results_df[col].dtype} (unique values: {results_df[col].nunique()})")
+        st.write("**First few rows:**")
+        st.dataframe(results_df.head(3))
+
+    # Use smart detection for the main visualization
+    try:
+        chart_type, x_col, y_col, title = smart_detect_chart_type(results_df)
+
+        st.write(f"**Detected chart type:** {chart_type}")
+        st.write(f"**X column:** {x_col}")
+        st.write(f"**Y column:** {y_col}")
+
+    except Exception as e:
+        st.error(f"Error detecting chart type: {e}")
+        return
+
+    if chart_type:
+        try:
+            chart = create_insights_chart(
+                data=results_df,
+                labels=x_col,
+                values=y_col,
+                chart_type=chart_type,
+                title=title
+            )
+
+            if chart:
+                st.plotly_chart(chart, use_container_width=True)
+            else:
+                st.info("Could not generate primary visualization.")
+        except Exception as e:
+            st.warning(f"Could not create primary visualization: {e}")
+            # Show the error details
+            st.error(f"Full error: {str(e)}")
+
+    # Additional exploratory visualizations
     numeric_cols = results_df.select_dtypes(include=['number']).columns.tolist()
     categorical_cols = results_df.select_dtypes(include=['object', 'category']).columns.tolist()
     date_cols = results_df.select_dtypes(include=['datetime64[ns]']).columns.tolist()
@@ -167,11 +470,11 @@ def auto_visualize(results_df: pd.DataFrame):
         if 1 < results_df[col].nunique() <= 30
     ]
 
-    charts_created = 0
+    charts_created = 1 if chart_type else 0
     max_charts = 4
 
-    # Time series analysis
-    if date_cols and numeric_cols and charts_created < max_charts:
+    # Time series analysis (if not already shown)
+    if date_cols and numeric_cols and charts_created < max_charts and chart_type != 'line':
         date_col = date_cols[0]
         num_col = numeric_cols[0]
         try:
@@ -182,38 +485,41 @@ def auto_visualize(results_df: pd.DataFrame):
         except Exception as e:
             st.warning(f"Could not create time series plot: {e}")
 
-    # Categorical distribution (Pie or Bar)
-    if filtered_categorical_cols and charts_created < max_charts:
+    # Categorical distribution (if not already shown)
+    if filtered_categorical_cols and charts_created < max_charts and chart_type not in ['pie', 'bar']:
         cat_col = filtered_categorical_cols[0]
         try:
             if results_df[cat_col].nunique() <= 10:
                 st.write(f"**Distribution by `{cat_col}`**")
                 chart = create_insights_chart(results_df, labels=cat_col, chart_type='pie',
                                               title=f"Distribution of {cat_col}")
-                st.plotly_chart(chart, use_container_width=True)
-                charts_created += 1
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True)
+                    charts_created += 1
             else:
                 st.write(f"**Count by `{cat_col}`**")
                 chart = create_insights_chart(results_df, labels=cat_col, chart_type='bar', title=f"Count by {cat_col}")
-                st.plotly_chart(chart, use_container_width=True)
-                charts_created += 1
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True)
+                    charts_created += 1
         except Exception as e:
             st.warning(f"Could not create categorical plot: {e}")
 
-    # Numeric distribution (Histogram)
-    if numeric_cols and charts_created < max_charts:
+    # Numeric distribution (if not already shown)
+    if numeric_cols and charts_created < max_charts and chart_type != 'histogram':
         num_col = numeric_cols[0]
         try:
             st.write(f"**Distribution of `{num_col}`**")
             chart = create_insights_chart(results_df, labels=num_col, chart_type='histogram',
                                           title=f"Distribution of {num_col}")
-            st.plotly_chart(chart, use_container_width=True)
-            charts_created += 1
+            if chart:
+                st.plotly_chart(chart, use_container_width=True)
+                charts_created += 1
         except Exception as e:
             st.warning(f"Could not create histogram: {e}")
 
-    # Scatter plot for relationship between two numeric variables
-    if len(numeric_cols) >= 2 and charts_created < max_charts:
+    # Scatter plot for relationship between two numeric variables (if not already shown)
+    if len(numeric_cols) >= 2 and charts_created < max_charts and chart_type != 'scatter':
         x_col, y_col = numeric_cols[0], numeric_cols[1]
         try:
             st.write(f"**Relationship between `{x_col}` and `{y_col}`**")
