@@ -1,3 +1,5 @@
+import sys
+
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
@@ -8,7 +10,62 @@ import pyodbc
 
 
 import ui
-from database.connection import maintain_connection, wakeup_connection, perform_keepalive
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+# Try different import approaches to handle the wakeup_connection issue
+try:
+    # First try: Import from database.connection directly
+    from database.connection import (
+        get_db_connection,
+        maintain_connection,
+        perform_keepalive,
+        test_database_connection,
+        show_connection_status
+    )
+
+    # Create wakeup_connection as an alias for perform_keepalive
+    wakeup_connection = perform_keepalive
+
+    st.sidebar.info("✅ Database connection module loaded successfully")
+
+except ImportError as e1:
+    st.sidebar.warning(f"⚠️ Direct import failed: {e1}")
+
+    try:
+        # Second try: Import from database package
+        from database import (
+            get_db_connection,
+            maintain_connection,
+            perform_keepalive,
+            test_database_connection,
+            show_connection_status
+        )
+
+        # Create wakeup_connection as an alias
+        wakeup_connection = perform_keepalive
+
+        st.sidebar.info("✅ Database package loaded successfully")
+
+    except ImportError as e2:
+        st.sidebar.error(f"❌ Package import failed: {e2}")
+
+        try:
+            # Third try: Import using compatibility module
+            from database.compatibility import (
+                get_db_connection,
+                maintain_connection,
+                wakeup_connection,
+                test_database_connection,
+                show_connection_status
+            )
+
+            st.sidebar.info("✅ Database compatibility module loaded")
+
+        except ImportError as e3:
+            st.sidebar.error(f"❌ Compatibility import failed: {e3}")
 
 # ⚠️ IMPORTANT: Set page config FIRST, before any other imports or operations ⚠️
 st.set_page_config(

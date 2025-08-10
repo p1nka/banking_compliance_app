@@ -1,637 +1,1392 @@
-import pandas as pd
+# --- COMPLETE 17 COMPLIANCE VERIFICATION AGENTS (As per PDF Documentation) ---
+
+from enum import Enum
+import os
+import csv
+from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta
-import streamlit as st
-# Assuming get_db_connection is correctly set up in your project
-from database.connection import get_db_connection
-import pyodbc  # Added import for pyodbc
+import json
+import logging
+import time
+import re
 
-# CBUAE Compliance Periods/Values (can be in config.py)
-THREE_MONTH_WAIT_DAYS = 90
-RECORD_RETENTION_YEARS_POLICY = 7  # Example bank policy, CBUAE is often perpetual post-transfer
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-
-def detect_incomplete_contact_attempts(df):
-    """
-    Detects accounts where contact attempts are insufficient as per CBUAE Art. 3.1 / Art. 5.
-    This check focuses on accounts expected to be dormant or needing contact.
-    Assumes columns like 'Bank_Contact_Attempted_Post_Dormancy_Trigger', 'Customer_Responded_to_Bank_Contact'
-    are present from the schema or set by data standardization.
-    Also considers 'Expected_Account_Dormant' which might be set by dormant agents.
-    """
-    try:
-        required_cols = [
-            'Account_ID', 'Expected_Account_Dormant',  # From dormant agent / initial data
-            'Bank_Contact_Attempted_Post_Dormancy_Trigger',  # From schema
-            'Customer_Responded_to_Bank_Contact'  # From schema
-        ]
-        # Your CSV uses Email_Contact_Attempt, SMS_Contact_Attempt, Phone_Call_Attempt
-        # Let's adapt to use those if 'Bank_Contact_Attempted_Post_Dormancy_Trigger' is not the primary indicator
-        # CBUAE requires *multiple* channels. This checks if *any* required contact hasn't happened or failed.
-
-        contact_method_cols = ['Email_Contact_Attempt', 'SMS_Contact_Attempt',
-                               'Phone_Call_Attempt']  # From your schema.py
-
-        # Check if core required columns exist
-        if not ('Account_ID' in df.columns and 'Expected_Account_Dormant' in df.columns and \
-                all(col in df.columns for col in contact_method_cols)):
-            missing = [c for c in ['Account_ID', 'Expected_Account_Dormant'] + contact_method_cols if
-                       c not in df.columns]
-            return pd.DataFrame(), 0, f"(Skipped Incomplete Contact: Missing {', '.join(missing)})"
-
-        # Condition: Account is expected to be dormant OR bank has already started a dormancy-related contact
-        # AND at least one of the primary contact methods shows 'no' (or implies failure)
-        # This is a simplification. True CBUAE compliance would check *sufficiency* of attempts.
-        # The provided `detect_incomplete_contact` looks for at least one 'no'.
-
-        data = df[
-            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (
-                    (df['Email_Contact_Attempt'].astype(str).str.lower().isin(['no', 'nan', ''])) |
-                    (df['SMS_Contact_Attempt'].astype(str).str.lower().isin(['no', 'nan', ''])) |
-                    (df['Phone_Call_Attempt'].astype(str).str.lower().isin(['no', 'nan', '']))
-                # Add 'Customer_Responded_to_Bank_Contact' == 'no' if bank *did* attempt all
-                # This gets complex quickly and depends on how Bank_Contact_Attempted_Post_Dormancy_Trigger is used.
-            )
-            ].copy()
-
-        count = len(data)
-        desc = f"Accounts (expected dormant) with potentially incomplete contact attempts (CBUAE Art 3.1/5): {count} accounts"
-        return data, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Incomplete Contact check: {e})"
+# Constants and Enums
+class ComplianceStatus(Enum):
+    COMPLIANT = "compliant"
+    NON_COMPLIANT = "non_compliant"
+    PARTIAL_COMPLIANT = "partial_compliant"
+    PENDING_REVIEW = "pending_review"
+    CRITICAL_VIOLATION = "critical_violation"
 
 
-def detect_unflagged_dormant_candidates(df, inactivity_threshold_date):
-    """
-    Detects accounts inactive over CBUAE threshold (Art. 2), not yet flagged as 'Expected_Account_Dormant'.
-    This is a crucial compliance check.
-    Uses: Date_Last_Cust_Initiated_Activity, Account_Type, Unclaimed_Item_Trigger_Date (for instruments)
-          and checks against 'Expected_Account_Dormant'.
-    """
-    try:
-        required_cols_general = ['Account_ID', 'Date_Last_Cust_Initiated_Activity', 'Account_Type',
-                                 'Expected_Account_Dormant']
-        required_cols_instr = ['Unclaimed_Item_Trigger_Date']  # For payment instruments
-
-        if not all(col in df.columns for col in required_cols_general):
-            missing = [c for c in required_cols_general if c not in df.columns]
-            return pd.DataFrame(), 0, f"(Skipped Unflagged Candidates: Missing general cols {', '.join(missing)})"
-
-        # Convert date columns
-        if not pd.api.types.is_datetime64_dtype(df['Date_Last_Cust_Initiated_Activity']):
-            df['Date_Last_Cust_Initiated_Activity'] = pd.to_datetime(df['Date_Last_Cust_Initiated_Activity'],
-                                                                     errors='coerce')
-        if 'Unclaimed_Item_Trigger_Date' in df.columns and not pd.api.types.is_datetime64_dtype(
-                df['Unclaimed_Item_Trigger_Date']):
-            df['Unclaimed_Item_Trigger_Date'] = pd.to_datetime(df['Unclaimed_Item_Trigger_Date'], errors='coerce')
-
-        # Standard accounts (e.g., 3 years)
-        standard_accounts_unflagged = df[
-            (df['Date_Last_Cust_Initiated_Activity'].notna()) &
-            (df['Date_Last_Cust_Initiated_Activity'] < inactivity_threshold_date) &
-            (~df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (~df['Account_Type'].astype(str).str.lower().isin(
-                ['bankers_cheque', 'bank_draft', 'cashier_order', 'safe_deposit_box']))
-            # Exclude types handled separately for dormancy trigger
-            ].copy()
-
-        # Payment instruments (e.g., 1 year from Unclaimed_Item_Trigger_Date)
-        payment_instruments_unflagged_list = []
-        if all(col in df.columns for col in required_cols_instr):
-            one_year_ago_instr = datetime.now() - timedelta(days=365 * 1)  # CBUAE Art 2.4
-            payment_instruments_unflagged = df[
-                (df['Account_Type'].astype(str).str.lower().isin(['bankers_cheque', 'bank_draft', 'cashier_order'])) &
-                (df['Unclaimed_Item_Trigger_Date'].notna()) &
-                (df['Unclaimed_Item_Trigger_Date'] < one_year_ago_instr) &
-                (~df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1']))
-                ].copy()
-            if not payment_instruments_unflagged.empty:
-                payment_instruments_unflagged_list.append(payment_instruments_unflagged)
-
-        all_unflagged = pd.concat([standard_accounts_unflagged] + payment_instruments_unflagged_list).drop_duplicates(
-            subset=['Account_ID'])
-        count = len(all_unflagged)
-        desc = f"Accounts meeting dormancy criteria but NOT FLAGGED 'Expected_Account_Dormant' (CBUAE Art. 2): {count} accounts"
-        return all_unflagged, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Unflagged Dormant Candidates check: {e})"
+class ViolationType(Enum):
+    ARTICLE_2_VIOLATION = "article_2_violation"
+    ARTICLE_3_1_VIOLATION = "article_3_1_violation"
+    ARTICLE_3_4_VIOLATION = "article_3_4_violation"
+    CONTACT_VIOLATION = "contact_violation"
+    TRANSFER_VIOLATION = "transfer_violation"
+    DOCUMENTATION_VIOLATION = "documentation_violation"
+    TIMELINE_VIOLATION = "timeline_violation"
+    AMOUNT_VIOLATION = "amount_violation"
+    REPORTING_VIOLATION = "reporting_violation"
+    FX_VIOLATION = "fx_violation"
+    CLAIM_VIOLATION = "claim_violation"
+    AUDIT_VIOLATION = "audit_violation"
 
 
-def detect_internal_ledger_candidates(df):
-    """
-    Detects accounts flagged 'Expected_Account_Dormant' AND 'Expected_Requires_Article_3_Process',
-    AND 3-month waiting period after last bank contact is over,
-    that are NOT YET in the internal 'dormant_ledger' table (CBUAE Art. 3.4, 3.5).
-    Uses: Account_ID, Expected_Account_Dormant, Expected_Requires_Article_3_Process, Date_Last_Bank_Contact_Attempt
-    """
-    try:
-        required_cols = [
-            'Account_ID', 'Expected_Account_Dormant',
-            'Expected_Requires_Article_3_Process', 'Date_Last_Bank_Contact_Attempt'
-        ]
-        if not all(col in df.columns for col in required_cols):
-            missing = [c for c in required_cols if c not in df.columns]
-            return pd.DataFrame(), 0, f"(Skipped Internal Ledger: Missing {', '.join(missing)})"
-
-        if not pd.api.types.is_datetime64_dtype(df['Date_Last_Bank_Contact_Attempt']):
-            df['Date_Last_Bank_Contact_Attempt'] = pd.to_datetime(df['Date_Last_Bank_Contact_Attempt'], errors='coerce')
-
-        three_months_ago = datetime.now() - timedelta(days=THREE_MONTH_WAIT_DAYS)
-
-        data = df[
-            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (df['Expected_Requires_Article_3_Process'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (df['Date_Last_Bank_Contact_Attempt'].notna()) &
-            (df['Date_Last_Bank_Contact_Attempt'] < three_months_ago)  # Waiting period passed
-            ].copy()
-
-        ids_in_ledger = []
-        conn = get_db_connection()
-        if conn:
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT account_id FROM dormant_ledger")
-                    ids_in_ledger = [row[0] for row in cursor.fetchall()]
-            except Exception as db_e:
-                # FIX: A failed SELECT does not require a rollback.
-                # Simply warn the user and proceed. The faulty rollback logic is removed.
-                st.sidebar.warning(f"Could not check dormant_ledger table: {db_e}. Proceeding without filtering.")
-
-        if ids_in_ledger:
-            data = data[~data['Account_ID'].isin(ids_in_ledger)]
-
-        count = len(data)
-        desc = f"Dormant accounts for INTERNAL LEDGER transfer (Art. 3.5, post {THREE_MONTH_WAIT_DAYS}-day wait): {count} accounts"
-        return data, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Internal Ledger Candidates check: {e})"
+class Priority(Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+    IMMEDIATE = "immediate"
 
 
-def detect_statement_freeze_candidates(df, inactivity_threshold_date_for_freeze):
-    """
-    Detects accounts flagged 'Expected_Account_Dormant' that should have statement generation suppressed (CBUAE Art. 7.3).
-    Uses: Expected_Account_Dormant, Date_Last_Cust_Initiated_Activity
-          (And a schema column like 'Statement_Suppression_Active' if available to check current status)
-    """
-    try:
-        required_cols = ['Account_ID', 'Expected_Account_Dormant', 'Date_Last_Cust_Initiated_Activity']
-        # Optional: 'Statement_Suppression_Active' to check if already done
-        if not all(col in df.columns for col in required_cols):
-            missing = [c for c in required_cols if c not in df.columns]
-            return pd.DataFrame(), 0, f"(Skipped Statement Freeze: Missing {', '.join(missing)})"
-
-        if not pd.api.types.is_datetime64_dtype(df['Date_Last_Cust_Initiated_Activity']):
-            df['Date_Last_Cust_Initiated_Activity'] = pd.to_datetime(df['Date_Last_Cust_Initiated_Activity'],
-                                                                     errors='coerce')
-
-        data = df[
-            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (df['Date_Last_Cust_Initiated_Activity'].notna()) &
-            # Typically freeze applies once dormant, sometimes after a deeper inactivity period
-            (df['Date_Last_Cust_Initiated_Activity'] < inactivity_threshold_date_for_freeze)
-            # Optionally, add: & (df.get('Statement_Suppression_Active', pd.Series(dtype=str)).astype(str).str.lower() != 'yes')
-            ].copy()
-        count = len(data)
-        desc = f"Dormant accounts requiring statement suppression (Art. 7.3): {count} accounts"
-        return data, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Statement Freeze Candidates check: {e})"
+class RiskLevel(Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
 
 
-def detect_cbuae_transfer_candidates(df):
-    """
-    Detects accounts/balances flagged 'Expected_Transfer_to_CB_Due' (CBUAE Art. 8).
-    This relies on dormant agents or a master process setting this flag correctly
-    based on 5-year inactivity and other Art. 8.1 conditions.
-    Uses: Account_ID, Expected_Account_Dormant, Expected_Transfer_to_CB_Due
-    """
-    try:
-        required_cols = ['Account_ID', 'Expected_Account_Dormant', 'Expected_Transfer_to_CB_Due']
-        if not all(col in df.columns for col in required_cols):
-            missing = [c for c in required_cols if c not in df.columns]
-            return pd.DataFrame(), 0, f"(Skipped CBUAE Transfer: Missing {', '.join(missing)})"
-
-        data = df[
-            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (df['Expected_Transfer_to_CB_Due'].astype(str).str.lower().isin(['yes', 'true', '1']))
-            ].copy()
-        count = len(data)
-        desc = f"Dormant accounts/balances due for CBUAE transfer (Art. 8): {count} items"
-        return data, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in CBUAE Transfer Candidates check: {e})"
+class CBUAEArticle(Enum):
+    ARTICLE_2 = "article_2"
+    ARTICLE_3_1 = "article_3_1"
+    ARTICLE_3_4 = "article_3_4"
+    ARTICLE_3_6 = "article_3_6"
+    ARTICLE_3_7 = "article_3_7"
+    ARTICLE_3_9 = "article_3_9"
+    ARTICLE_3_10 = "article_3_10"
+    ARTICLE_4 = "article_4"
+    ARTICLE_5 = "article_5"
+    ARTICLE_7_3 = "article_7_3"
+    ARTICLE_8 = "article_8"
+    ARTICLE_8_5 = "article_8_5"
 
 
-def log_flag_instructions(account_ids, agent_name, threshold_days):
-    """
-    Log flagging instructions to the dormant_flags table.
-    """
-    if not account_ids:
-        return False, "No accounts to flag"
+class AccountType(Enum):
+    SAFE_DEPOSIT = "safe_deposit"
+    INVESTMENT = "investment"
+    FIXED_DEPOSIT = "fixed_deposit"
+    DEMAND_DEPOSIT = "demand_deposit"
+    UNCLAIMED_INSTRUMENT = "unclaimed_instrument"
+    SAVINGS = "savings"
+    CURRENT = "current"
 
-    conn = get_db_connection()
-    if not conn:
-        return False, "Database connection failed"
 
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'dormant_flags'")
-            table_exists = cursor.fetchone() is not None
+class ActivityStatus(Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    DORMANT = "dormant"
+    UNCLAIMED = "unclaimed"
 
-            if not table_exists:
-                return False, "Error: 'dormant_flags' table not found in the database. Run schema initialization."
 
-            insert_sql = """
-                         INSERT INTO dormant_flags (account_id, flag_instruction, timestamp)
-                         VALUES (%s, %s, %s)
-                         """
+# Base Compliance Agent Class
+class ComplianceAgent:
+    def __init__(self, llm_client: Any = None, config: Any = None):
+        self.llm_client = llm_client
+        self.config = config
+        self.llm_available = bool(llm_client)
 
-            timestamp_now = datetime.now()
-            rows_inserted = 0
-            skipped_due_to_existence = 0
+        if config and hasattr(config, 'rag_system') and hasattr(config.rag_system, 'llm_for_generation'):
+            self.llm_config_gen = config.rag_system.llm_for_generation
+            self.llm_provider = self.llm_config_gen.provider.lower() if hasattr(self.llm_config_gen,
+                                                                                'provider') else 'unknown'
+            self.llm_model_name = self.llm_config_gen.model_name if hasattr(self.llm_config_gen,
+                                                                            'model_name') else 'unknown'
+        else:
+            self.llm_provider = 'unknown'
+            self.llm_model_name = 'unknown'
 
-            for acc_id in account_ids:
-                if pd.notna(acc_id) and str(acc_id).strip() != '':
-                    try:
-                        cursor.execute("SELECT 1 FROM dormant_flags WHERE account_id = %s", (str(acc_id),))
-                        if cursor.fetchone():
-                            skipped_due_to_existence += 1
-                            continue
+    def _call_generative_llm(self, user_prompt: str, system_prompt: Optional[str] = None) -> str:
+        """Synchronous helper to call the configured generative LLM."""
+        if not self.llm_client:
+            return "LLM client not available - using rule-based analysis."
 
-                        cursor.execute(
-                            insert_sql,
-                            (
-                                str(acc_id),
-                                f"Identified by {agent_name} for review (Threshold: {threshold_days} days) - CBUAE",
-                                timestamp_now
-                            )
-                        )
-                        rows_inserted += cursor.rowcount
+        try:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": user_prompt})
 
-                    except Exception as e_row:
-                        if "PRIMARY KEY constraint" in str(e_row):
-                            skipped_due_to_existence += 1
-                        else:
-                            st.sidebar.warning(f"Skipping log for {acc_id} due to DB error: {e_row}")
-
-            # FIX: Only commit if rows were actually inserted. This prevents the
-            # "Cannot commit transaction" error if no new data was added.
-            if rows_inserted > 0:
-                conn.commit()
-
-            if skipped_due_to_existence > 0:
-                return True, f"Logged {rows_inserted} new unique accounts. {skipped_due_to_existence} were already in the flagging log or caused an error."
+            if self.llm_provider in ["openai", "azure_openai", "groq"]:
+                response = self.llm_client.chat.completions.create(
+                    model=self.llm_model_name,
+                    messages=messages,
+                    temperature=0.1
+                )
+                return response.choices[0].message.content
+            elif self.llm_provider == "ollama":
+                response = self.llm_client.generate(
+                    model=self.llm_model_name,
+                    prompt=f"{system_prompt}\n{user_prompt}" if system_prompt else user_prompt,
+                    stream=False
+                )
+                return response.get('response', 'No response from Ollama')
             else:
-                return True, f"Logged {rows_inserted} unique accounts for flagging review!"
+                return f"Unsupported LLM provider: {self.llm_provider}"
 
-    except Exception as e:
-        # The original error happens before this block is reached. If an error occurs
-        # during the process (e.g., connection lost), a rollback is still a good idea.
-        # But we must handle the case where the connection is already closed.
-        if conn:
-            try:
-                conn.rollback()
-            except Exception as rollback_e:
-                # Avoid showing a secondary error if the rollback itself fails
-                st.sidebar.error(f"DB logging failed: {e}. Additionally, rollback failed: {rollback_e}")
-                return False, f"DB logging failed: {e}"
+        except Exception as e:
+            logger.error(f"Error calling generative LLM: {e}")
+            return f"Failed to generate LLM response: {str(e)}"
 
-        return False, f"DB logging failed: {e}"
+    def get_llm_recommendation(self, violation_context: str, article: str = None) -> str:
+        """Get AI-powered compliance recommendations."""
+        system_prompt = """You are a CBUAE banking compliance expert. Provide specific regulatory analysis, 
+        immediate remediation steps, and compliance recommendations for the given violation context."""
 
+        user_prompt = f"""
+        Compliance Analysis Required:
+        Article: {article or 'General Compliance'}
+        Violation: {violation_context}
 
-# Additional compliance agents
-def detect_flag_candidates(df, inactivity_threshold_date):
-    """Alias for detect_unflagged_dormant_candidates for UI compatibility"""
-    return detect_unflagged_dormant_candidates(df, inactivity_threshold_date)
+        Provide:
+        1. Regulatory assessment and citation
+        2. Immediate remediation actions
+        3. Risk mitigation recommendations
+        4. Compliance monitoring steps
+        """
+        return self._call_generative_llm(user_prompt, system_prompt)
 
-
-def detect_ledger_candidates(df):
-    """Alias for detect_internal_ledger_candidates for UI compatibility"""
-    return detect_internal_ledger_candidates(df)
-
-
-def detect_freeze_candidates(df, inactivity_threshold_date_for_freeze):
-    """Alias for detect_statement_freeze_candidates for UI compatibility"""
-    return detect_statement_freeze_candidates(df, inactivity_threshold_date_for_freeze)
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        raise NotImplementedError("Each compliance agent must implement the execute method")
 
 
-def detect_transfer_candidates_to_cb(df):
-    """Alias for detect_cbuae_transfer_candidates for UI compatibility"""
-    return detect_cbuae_transfer_candidates(df)
+# =============================================================================
+# ALL 17 COMPLIANCE VERIFICATION AGENTS (As per PDF Documentation)
+# =============================================================================
 
-
-def detect_foreign_currency_conversion_needed(df):
+# Agent 1: Article 2 Compliance Agent - Detect Dormant Accounts
+class Article2ComplianceAgent(ComplianceAgent):
     """
-    Detects dormant accounts in foreign currency that need conversion to AED for CBUAE transfer (Art. 8.5).
+    Purpose: Detects accounts that meet dormancy criteria per CBUAE Article 2
+    Functionality: Verifies account dormancy classification based on inactivity periods
     """
-    try:
-        required_cols = ['Account_ID', 'Expected_Account_Dormant', 'Expected_Transfer_to_CB_Due', 'Currency',
-                         'Current_Balance']
-        if not all(col in df.columns for col in required_cols):
-            missing = [c for c in required_cols if c not in df.columns]
-            return pd.DataFrame(), 0, f"(Skipped FX Conversion: Missing {', '.join(missing)})"
 
-        data = df[
-            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (df['Expected_Transfer_to_CB_Due'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (~df['Currency'].astype(str).str.upper().isin(['AED', 'DIRHAM', 'DIRHAMS', ''])) &
-            (pd.to_numeric(df['Current_Balance'], errors='coerce').fillna(0) > 0)
-            ].copy()
-        count = len(data)
-        desc = f"Foreign currency dormant accounts needing AED conversion for CBUAE transfer (Art. 8.5): {count} accounts"
-        return data, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Foreign Currency Conversion check: {e})"
-
-
-def detect_sdb_court_application_needed(df):
-    """
-    Detects Safe Deposit Boxes requiring court application (Art. 3.7).
-    """
-    try:
-        required_cols = [
-            'Account_ID', 'Account_Type', 'Expected_Account_Dormant',
-            'SDB_Charges_Outstanding', 'SDB_Court_Application_Submitted'
-        ]
-        if not all(col in df.columns for col in required_cols):
-            missing = [c for c in required_cols if c not in df.columns]
-            return pd.DataFrame(), 0, f"(Skipped SDB Court Application: Missing {', '.join(missing)})"
-
-        data = df[
-            (df['Account_Type'].astype(str).str.contains("Safe Deposit", case=False, na=False)) &
-            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (pd.to_numeric(df['SDB_Charges_Outstanding'], errors='coerce').fillna(0) > 0) &
-            (~df['SDB_Court_Application_Submitted'].astype(str).str.lower().isin(['yes', 'true', '1']))
-            ].copy()
-        count = len(data)
-        desc = f"Safe Deposit Boxes requiring court application (Art. 3.7): {count} boxes"
-        return data, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in SDB Court Application check: {e})"
-
-
-def detect_unclaimed_payment_instruments_ledger(df):
-    """
-    Detects unclaimed payment instruments for internal ledger (Art. 3.6).
-    """
-    try:
-        required_cols = [
-            'Account_ID', 'Account_Type', 'Expected_Account_Dormant',
-            'Unclaimed_Item_Trigger_Date', 'Moved_To_Internal_Dormant_Ledger'
-        ]
-        if not all(col in df.columns for col in required_cols):
-            missing = [c for c in required_cols if c not in df.columns]
-            return pd.DataFrame(), 0, f"(Skipped Unclaimed Instruments Ledger: Missing {', '.join(missing)})"
-
-        if not pd.api.types.is_datetime64_dtype(df['Unclaimed_Item_Trigger_Date']):
-            df['Unclaimed_Item_Trigger_Date'] = pd.to_datetime(df['Unclaimed_Item_Trigger_Date'], errors='coerce')
-
-        data = df[
-            (df['Account_Type'].astype(str).str.contains("Cheque|Draft|Order", case=False, na=False)) &
-            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (df['Unclaimed_Item_Trigger_Date'].notna()) &
-            (~df['Moved_To_Internal_Dormant_Ledger'].astype(str).str.lower().isin(['yes', 'true', '1']))
-            ].copy()
-        count = len(data)
-        desc = f"Unclaimed payment instruments for internal ledger (Art. 3.6): {count} instruments"
-        return data, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Unclaimed Instruments Ledger check: {e})"
-
-
-def detect_claim_processing_pending(df):
-    """
-    Detects customer claims (>1 month old) pending processing (Art. 4).
-    """
-    try:
-        required_cols = [
-            'Account_ID', 'Customer_Claim_Date', 'Claim_Status'
-        ]
-        if not all(col in df.columns for col in required_cols):
-            missing = [c for c in required_cols if c not in df.columns]
-            return pd.DataFrame(), 0, f"(Skipped Claims Processing: Missing {', '.join(missing)})"
-
-        if not pd.api.types.is_datetime64_dtype(df['Customer_Claim_Date']):
-            df['Customer_Claim_Date'] = pd.to_datetime(df['Customer_Claim_Date'], errors='coerce')
-
-        one_month_ago = datetime.now() - timedelta(days=30)
-
-        data = df[
-            (df['Customer_Claim_Date'].notna()) &
-            (df['Customer_Claim_Date'] < one_month_ago) &
-            (~df['Claim_Status'].astype(str).str.lower().isin(['completed', 'processed', 'resolved', 'rejected']))
-            ].copy()
-        count = len(data)
-        desc = f"Customer claims (>1 month old) pending processing (Art. 4): {count} claims"
-        return data, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Claims Processing check: {e})"
-
-
-def generate_annual_cbuae_report_summary(df):
-    """
-    Generates summary for CBUAE Annual Report (Art. 3.10).
-    """
-    try:
-        required_cols = [
-            'Account_ID', 'Expected_Account_Dormant', 'Current_Balance', 'Currency',
-            'Expected_Transfer_to_CB_Due', 'Transferred_to_CBUAE_Date'
-        ]
-        if not all(col in df.columns for col in required_cols):
-            missing = [c for c in required_cols if c not in df.columns]
-            return pd.DataFrame(), 0, f"(Skipped Annual Report: Missing {', '.join(missing)})"
-
-        # Get accounts flagged dormant
-        dormant_accounts = df[
-            (df['Expected_Account_Dormant'].astype(str).str.lower().isin(['yes', 'true', '1']))
-        ].copy()
-
-        # Get accounts flagged for CB transfer but not yet transferred
-        pending_cb_transfer = df[
-            (df['Expected_Transfer_to_CB_Due'].astype(str).str.lower().isin(['yes', 'true', '1'])) &
-            (~df['Transferred_to_CBUAE_Date'].notna())
-            ].copy()
-
-        # Get accounts already transferred to CB
-        transferred_to_cb = df[
-            (df['Transferred_to_CBUAE_Date'].notna())
-        ].copy()
-
-        # Create report summary data
-        this_year = datetime.now().year
-        summary_data = {
-            'ReportYear': this_year,
-            'TotalDormantAccounts': len(dormant_accounts),
-            'TotalDormantBalance': dormant_accounts['Current_Balance'].astype(float).sum(),
-            'PendingCBTransfer': len(pending_cb_transfer),
-            'PendingCBTransferBalance': pending_cb_transfer['Current_Balance'].astype(float).sum(),
-            'TransferredToCB': len(transferred_to_cb),
-            'TransferredToCBBalance': transferred_to_cb['Current_Balance'].astype(float).sum(),
-            'ReportGenerationDate': datetime.now()
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'article_2_compliance_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'CBUAE Art. 2 - Dormant Account Definition'
         }
 
-        # Convert to DataFrame for the report
-        summary_df = pd.DataFrame([summary_data])
+        last_activity_date = account_data.get('last_activity_date') or account_data.get('last_transaction_date')
+        if isinstance(last_activity_date, str):
+            try:
+                last_activity_date = datetime.fromisoformat(last_activity_date.replace('Z', '+00:00'))
+            except ValueError:
+                result['compliance_status'] = ComplianceStatus.PENDING_REVIEW.value
+                result['violations'] = ['Invalid last activity date format']
+                return result
 
-        count = 1  # Just one summary row
-        desc = f"Annual CBUAE Report Summary for {this_year} generated (Art. 3.10): {len(dormant_accounts)} dormant accounts"
-        return summary_df, count, desc
-    except Exception as e:
-        return pd.DataFrame(), 0, f"(Error in Annual Report Summary check: {e})"
+        dormancy_status = account_data.get('dormancy_status', 'active')
+
+        if isinstance(last_activity_date, datetime):
+            days_inactive = (datetime.now() - last_activity_date).days
+            is_dormant_by_logic = days_inactive >= 1095  # 3 years as per CBUAE
+            is_flagged_as_dormant = dormancy_status == 'dormant'
+
+            if is_dormant_by_logic and not is_flagged_as_dormant:
+                violation = f"Account meets dormancy criteria (inactive {days_inactive} days) but not flagged as dormant"
+                result.update({
+                    'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                    'violations': [violation],
+                    'priority': Priority.HIGH.value,
+                    'risk_level': RiskLevel.HIGH.value,
+                    'action': 'Flag account as dormant and initiate dormancy procedures'
+                })
+
+                if self.llm_available:
+                    result['recommendation'] = self.get_llm_recommendation(violation, "CBUAE Article 2")
+
+        return result
 
 
-def check_record_retention_compliance(df):
+# Agent 2: Article 3.1 Process Compliance Agent - Contact Requirements
+class Article31ProcessComplianceAgent(ComplianceAgent):
     """
-    Checks record retention compliance (Art. 3.9 related).
-    Returns two DataFrames:
-    1. Records not meeting policy retention requirement (not compliant)
-    2. Compliant records (meets retention or CBUAE perpetual)
+    Purpose: Verifies compliance with customer contact requirements per CBUAE Article 3.1
+    Functionality: Checks contact attempts, methods, and documentation
     """
-    try:
-        required_cols = [
-            'Account_ID', 'Expected_Transfer_to_CB_Due', 'Transferred_to_CBUAE_Date',
-            'Date_Last_Cust_Initiated_Activity', 'Record_Retention_End_Date'
-        ]
-        if not all(col in df.columns for col in required_cols):
-            missing = [c for c in required_cols if c not in df.columns]
-            return pd.DataFrame(), pd.DataFrame(), f"(Skipped Record Retention: Missing {', '.join(missing)})"
 
-        # Convert date columns
-        date_cols = ['Date_Last_Cust_Initiated_Activity', 'Record_Retention_End_Date', 'Transferred_to_CBUAE_Date']
-        for col in date_cols:
-            if col in df.columns and not pd.api.types.is_datetime64_dtype(df[col]):
-                df[col] = pd.to_datetime(df[col], errors='coerce')
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'article_3_1_process_compliance_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'CBUAE Art. 3.1 - Customer Contact Requirements'
+        }
 
-        # Calculate records that might need retention
-        # 1. Items transferred to CBUAE - perpetual retention
-        cbuae_transferred = df[df['Transferred_to_CBUAE_Date'].notna()].copy()
+        if account_data.get('dormancy_status') == 'dormant':
+            violations = []
+            contact_attempts = account_data.get('contact_attempts_made', 0)
+            customer_type = account_data.get('customer_type', 'individual')
+            account_value = account_data.get('balance_current', 0)
 
-        # 2. Items not transferred to CBUAE - retention based on bank policy
-        bank_policy_records = df[
-            (~df['Transferred_to_CBUAE_Date'].notna()) &
-            (df['Date_Last_Cust_Initiated_Activity'].notna())
-            ].copy()
+            # Determine required contact attempts
+            required_attempts = 3  # Default minimum
+            if customer_type == 'individual' and account_value >= 25000:
+                required_attempts = 5
+            elif customer_type == 'corporate':
+                required_attempts = 5 if account_value >= 100000 else 4
 
-        # For bank policy records, calculate retention end date if not already populated
-        # Default policy is to keep records for RECORD_RETENTION_YEARS_POLICY years after last activity
-        if not bank_policy_records.empty:
-            bank_policy_records.loc[:, 'Calculated_Retention_End'] = bank_policy_records[
-                                                                         'Date_Last_Cust_Initiated_Activity'] + \
-                                                                     pd.Timedelta(
-                                                                         days=365 * RECORD_RETENTION_YEARS_POLICY)
+            if contact_attempts < required_attempts:
+                violations.append(f"Insufficient contact attempts: {contact_attempts} of {required_attempts} required")
 
-            # If Record_Retention_End_Date is populated, use that instead
-            bank_policy_records.loc[:, 'Effective_Retention_End'] = bank_policy_records.apply(
-                lambda x: x['Record_Retention_End_Date'] if pd.notna(x['Record_Retention_End_Date'])
-                else x['Calculated_Retention_End'], axis=1
-            )
+            if not account_data.get('contact_log_present', False):
+                violations.append("Contact efforts not properly documented")
 
-            # Records not compliant with policy - retention date passed
-            not_compliant_policy = bank_policy_records[
-                bank_policy_records['Effective_Retention_End'] < datetime.now()
-                ].copy()
+            contact_methods = account_data.get('contact_methods_used', [])
+            if isinstance(contact_methods, str):
+                contact_methods = contact_methods.split(',')
+            if len(contact_methods) < 2:
+                violations.append("Contact attempts lack multi-channel diversity")
 
-            # Records compliant with policy - retention date in future
-            compliant_policy = bank_policy_records[
-                bank_policy_records['Effective_Retention_End'] >= datetime.now()
-                ].copy()
+            if violations:
+                result.update({
+                    'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                    'violations': violations,
+                    'priority': Priority.HIGH.value,
+                    'risk_level': RiskLevel.HIGH.value,
+                    'action': f"Complete {required_attempts - contact_attempts} additional contact attempts"
+                })
+
+                if self.llm_available:
+                    result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 3.1")
+
+        return result
+
+
+# Agent 3: Article 3.4 Transfer Compliance Agent - Transfer to Central Bank
+class Article34TransferComplianceAgent(ComplianceAgent):
+    """
+    Purpose: Ensures compliance with Central Bank transfer requirements per CBUAE Article 3.4
+    Functionality: Verifies transfer eligibility, documentation, and timeline compliance
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'article_3_4_transfer_compliance_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'CBUAE Art. 3.4 - Central Bank Transfer Requirements'
+        }
+
+        if account_data.get('is_eligible_for_cb_transfer', False):
+            violations = []
+
+            if not account_data.get('transfer_docs_prepared', False):
+                violations.append("Required documentation for Central Bank transfer not prepared")
+
+            balance = account_data.get('balance_current', 0) or account_data.get('balance', 0)
+            if balance <= 0:
+                violations.append("Account marked for transfer has zero or negative balance")
+
+            # Check transfer timeline compliance
+            transfer_eligibility_date = account_data.get('transfer_eligibility_date')
+            if transfer_eligibility_date:
+                if isinstance(transfer_eligibility_date, str):
+                    transfer_eligibility_date = datetime.fromisoformat(transfer_eligibility_date.replace('Z', '+00:00'))
+
+                if isinstance(transfer_eligibility_date, datetime):
+                    days_since_eligible = (datetime.now() - transfer_eligibility_date).days
+                    if days_since_eligible > 90 and not account_data.get('transferred_to_cb_date'):
+                        violations.append(f"Transfer overdue by {days_since_eligible - 90} days")
+
+            if violations:
+                result.update({
+                    'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                    'violations': violations,
+                    'priority': Priority.CRITICAL.value,
+                    'risk_level': RiskLevel.CRITICAL.value,
+                    'action': 'Immediately process Central Bank transfer'
+                })
+
+                if self.llm_available:
+                    result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 3.4")
+
+        return result
+
+
+# Agent 4: Contact Verification Agent - Customer Contact Validation
+class ContactVerificationAgent(ComplianceAgent):
+    """
+    Purpose: Validates customer contact information and communication attempts
+    Functionality: Verifies contact details accuracy and communication effectiveness
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'contact_verification_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'CBUAE Art. 3.1 - Contact Verification'
+        }
+
+        violations = []
+
+        # Verify contact information completeness
+        email = account_data.get('customer_email', '')
+        phone = account_data.get('customer_phone', '')
+        address = account_data.get('customer_address', '')
+
+        if not email or not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+            violations.append("Invalid or missing customer email address")
+
+        if not phone or len(re.sub(r'[^\d]', '', phone)) < 7:
+            violations.append("Invalid or missing customer phone number")
+
+        if not address or len(address.strip()) < 10:
+            violations.append("Incomplete customer address information")
+
+        # Check contact attempt outcomes
+        if account_data.get('dormancy_status') == 'dormant':
+            contact_outcomes = account_data.get('contact_outcomes', [])
+            if isinstance(contact_outcomes, str):
+                contact_outcomes = contact_outcomes.split(',')
+
+            successful_contacts = len([outcome for outcome in contact_outcomes if 'successful' in outcome.lower()])
+            if successful_contacts == 0 and account_data.get('contact_attempts_made', 0) > 0:
+                violations.append("No successful customer contact despite multiple attempts")
+
+        if violations:
+            result.update({
+                'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                'violations': violations,
+                'priority': Priority.MEDIUM.value,
+                'risk_level': RiskLevel.MEDIUM.value,
+                'action': 'Update customer contact information and retry contact'
+            })
+
+            if self.llm_available:
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Contact Verification")
+
+        return result
+
+
+# Agent 5: Transfer Eligibility Agent - Eligibility Assessment
+class TransferEligibilityAgent(ComplianceAgent):
+    """
+    Purpose: Assesses account eligibility for Central Bank transfer
+    Functionality: Evaluates dormancy period, contact completion, and transfer criteria
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'transfer_eligibility_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'CBUAE Art. 3.4 - Transfer Eligibility Criteria'
+        }
+
+        account_type = account_data.get('account_type', '')
+        last_activity_date = account_data.get('last_activity_date')
+        contact_attempts = account_data.get('contact_attempts_made', 0)
+
+        if isinstance(last_activity_date, str):
+            last_activity_date = datetime.fromisoformat(last_activity_date.replace('Z', '+00:00'))
+
+        if isinstance(last_activity_date, datetime):
+            days_inactive = (datetime.now() - last_activity_date).days
+
+            # Determine eligibility based on account type and dormancy period
+            is_eligible = False
+            required_dormancy_days = 1825  # Default 5 years
+
+            if account_type == AccountType.SAFE_DEPOSIT.value:
+                required_dormancy_days = 1825  # 5 years for safe deposit
+            elif account_type == AccountType.UNCLAIMED_INSTRUMENT.value:
+                required_dormancy_days = 1095  # 3 years for unclaimed instruments
+
+            is_eligible = (days_inactive >= required_dormancy_days and
+                           contact_attempts >= 3 and
+                           account_data.get('dormancy_status') == 'dormant')
+
+            current_eligibility = account_data.get('is_eligible_for_cb_transfer', False)
+
+            if is_eligible and not current_eligibility:
+                violation = f"Account meets transfer eligibility criteria but not marked as eligible"
+                result.update({
+                    'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                    'violations': [violation],
+                    'priority': Priority.HIGH.value,
+                    'risk_level': RiskLevel.HIGH.value,
+                    'action': 'Mark account as eligible for Central Bank transfer'
+                })
+
+                if self.llm_available:
+                    result['recommendation'] = self.get_llm_recommendation(violation, "Transfer Eligibility")
+
+            elif not is_eligible and current_eligibility:
+                violation = f"Account marked as transfer eligible but doesn't meet criteria"
+                result.update({
+                    'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                    'violations': [violation],
+                    'priority': Priority.MEDIUM.value,
+                    'risk_level': RiskLevel.MEDIUM.value,
+                    'action': 'Review and correct transfer eligibility status'
+                })
+
+        return result
+
+
+# Agent 6: FX Conversion Check Agent - Foreign Currency Handling
+class FXConversionCheckAgent(ComplianceAgent):
+    """
+    Purpose: Ensures foreign currency accounts are converted to AED before Central Bank transfer
+    Functionality: Verifies currency conversion compliance per CBUAE Article 8.5
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'fx_conversion_check_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'CBUAE Art. 8.5 - Foreign Currency Conversion'
+        }
+
+        currency = account_data.get('currency', 'AED')
+        balance = account_data.get('balance_current', 0) or account_data.get('balance', 0)
+
+        if (account_data.get('is_eligible_for_cb_transfer', False) and
+                currency != 'AED' and balance > 0):
+
+            if not account_data.get('fx_conversion_complete', False):
+                violation = f"Foreign currency account ({currency}, {balance:,.2f}) requires conversion to AED"
+                result.update({
+                    'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                    'violations': [violation],
+                    'priority': Priority.HIGH.value,
+                    'risk_level': RiskLevel.MEDIUM.value,
+                    'action': f'Convert {currency} balance to AED before transfer'
+                })
+
+                if self.llm_available:
+                    result['recommendation'] = self.get_llm_recommendation(violation, "CBUAE Article 8.5")
+
+        return result
+
+
+# Agent 7: Process Management Agent - Overall Process Oversight
+class ProcessManagementAgent(ComplianceAgent):
+    """
+    Purpose: Provides overall process management and coordination oversight
+    Functionality: Monitors process flows, timelines, and inter-agent dependencies
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'process_management_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'Internal Process Management'
+        }
+
+        violations = []
+
+        # Check process stage consistency
+        dormancy_status = account_data.get('dormancy_status', 'active')
+        process_stage = account_data.get('process_stage', 'initial')
+
+        # Validate process flow logic
+        if dormancy_status == 'dormant' and process_stage == 'initial':
+            violations.append("Dormant account still in initial process stage")
+
+        if account_data.get('is_eligible_for_cb_transfer') and process_stage not in ['transfer_ready', 'transferred']:
+            violations.append("Transfer-eligible account not in appropriate process stage")
+
+        # Check for process bottlenecks
+        last_process_update = account_data.get('last_process_update_date')
+        if last_process_update:
+            if isinstance(last_process_update, str):
+                last_process_update = datetime.fromisoformat(last_process_update.replace('Z', '+00:00'))
+
+            if isinstance(last_process_update, datetime):
+                days_since_update = (datetime.now() - last_process_update).days
+                if days_since_update > 30 and dormancy_status == 'dormant':
+                    violations.append(f"Process stagnant for {days_since_update} days")
+
+        if violations:
+            result.update({
+                'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                'violations': violations,
+                'priority': Priority.MEDIUM.value,
+                'risk_level': RiskLevel.MEDIUM.value,
+                'action': 'Review and advance process stage appropriately'
+            })
+
+            if self.llm_available:
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Process Management")
+
+        return result
+
+
+# Agent 8: Documentation Review Agent - Document Completeness
+class DocumentationReviewAgent(ComplianceAgent):
+    """
+    Purpose: Reviews and validates completeness of required documentation
+    Functionality: Checks KYC, audit trails, contact logs, and regulatory documentation
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'documentation_review_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'Internal Documentation Standards'
+        }
+
+        violations = []
+
+        # Check KYC documentation
+        if not account_data.get('customer_kyc_complete', True):
+            violations.append("Customer KYC documentation incomplete or expired")
+
+        # Check audit trail completeness
+        if not account_data.get('audit_log_complete', True):
+            violations.append("Comprehensive audit trail missing or incomplete")
+
+        # Check contact documentation for dormant accounts
+        if account_data.get('dormancy_status') == 'dormant':
+            if not account_data.get('contact_log_present', False):
+                violations.append("Contact attempt documentation missing")
+
+            if not account_data.get('dormancy_declaration_signed', False):
+                violations.append("Dormancy declaration not properly documented")
+
+        # Check transfer documentation
+        if account_data.get('is_eligible_for_cb_transfer', False):
+            if not account_data.get('transfer_docs_prepared', False):
+                violations.append("Transfer documentation not prepared")
+
+            if not account_data.get('legal_verification_complete', False):
+                violations.append("Legal verification documentation incomplete")
+
+        if violations:
+            result.update({
+                'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                'violations': violations,
+                'priority': Priority.MEDIUM.value,
+                'risk_level': RiskLevel.MEDIUM.value,
+                'action': 'Complete missing documentation and update records'
+            })
+
+            if self.llm_available:
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Documentation Standards")
+
+        return result
+
+
+# Agent 9: Timeline Compliance Agent - Regulatory Timeline Management
+class TimelineComplianceAgent(ComplianceAgent):
+    """
+    Purpose: Monitors compliance with all regulatory timelines and deadlines
+    Functionality: Tracks dormancy periods, contact timelines, transfer deadlines, and claim processing
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'timeline_compliance_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'Multiple CBUAE Articles - Timeline Requirements'
+        }
+
+        violations = []
+
+        # Check claim processing timeline
+        if account_data.get('claim_status') == 'pending':
+            submission_date = account_data.get('claim_submission_date')
+            if submission_date:
+                if isinstance(submission_date, str):
+                    submission_date = datetime.fromisoformat(submission_date.replace('Z', '+00:00'))
+
+                if isinstance(submission_date, datetime):
+                    days_pending = (datetime.now() - submission_date).days
+                    if days_pending > 30:
+                        violations.append(f"Claim processing overdue by {days_pending - 30} days")
+
+        # Check transfer timeline
+        transfer_eligibility_date = account_data.get('transfer_eligibility_date')
+        if transfer_eligibility_date and not account_data.get('transfer_initiated_date'):
+            if isinstance(transfer_eligibility_date, str):
+                transfer_eligibility_date = datetime.fromisoformat(transfer_eligibility_date.replace('Z', '+00:00'))
+
+            if isinstance(transfer_eligibility_date, datetime):
+                days_overdue = (datetime.now() - transfer_eligibility_date).days
+                if days_overdue > 90:
+                    violations.append(f"Transfer initiation overdue by {days_overdue - 90} days")
+
+        # Check dormancy classification timeline
+        dormancy_trigger_date = account_data.get('dormancy_trigger_date')
+        if dormancy_trigger_date and account_data.get('dormancy_status') != 'dormant':
+            if isinstance(dormancy_trigger_date, str):
+                dormancy_trigger_date = datetime.fromisoformat(dormancy_trigger_date.replace('Z', '+00:00'))
+
+            if isinstance(dormancy_trigger_date, datetime):
+                days_delayed = (datetime.now() - dormancy_trigger_date).days
+                if days_delayed > 30:
+                    violations.append(f"Dormancy classification delayed by {days_delayed - 30} days")
+
+        # Check contact attempt timeline
+        if account_data.get('dormancy_status') == 'dormant':
+            last_contact_date = account_data.get('last_contact_attempt_date')
+            if last_contact_date:
+                if isinstance(last_contact_date, str):
+                    last_contact_date = datetime.fromisoformat(last_contact_date.replace('Z', '+00:00'))
+
+                if isinstance(last_contact_date, datetime):
+                    days_since_contact = (datetime.now() - last_contact_date).days
+                    if days_since_contact > 180:  # 6 months since last contact
+                        violations.append(f"No contact attempts for {days_since_contact} days")
+
+        if violations:
+            result.update({
+                'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                'violations': violations,
+                'priority': Priority.HIGH.value,
+                'risk_level': RiskLevel.HIGH.value,
+                'action': 'Address overdue timeline violations immediately'
+            })
+
+            if self.llm_available:
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Timeline Compliance")
+
+        return result
+
+
+# Agent 10: Amount Verification Agent - Financial Amount Validation
+class AmountVerificationAgent(ComplianceAgent):
+    """
+    Purpose: Verifies accuracy of financial amounts and balance calculations
+    Functionality: Validates account balances, transaction sums, and amount consistency
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'amount_verification_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'Internal Financial Data Accuracy'
+        }
+
+        violations = []
+
+        # Check balance consistency
+        current_balance = account_data.get('balance_current', 0)
+        ledger_balance = account_data.get('ledger_balance', current_balance)
+
+        if abs(current_balance - ledger_balance) > 0.01:  # Allow for minor rounding
+            violations.append(f"Balance mismatch: Current {current_balance}, Ledger {ledger_balance}")
+
+        # Check negative balance for dormant accounts
+        if account_data.get('dormancy_status') == 'dormant' and current_balance < 0:
+            violations.append("Dormant account has negative balance")
+
+        # Verify minimum balance for transfer eligibility
+        if account_data.get('is_eligible_for_cb_transfer') and current_balance <= 0:
+            violations.append("Transfer-eligible account has zero or negative balance")
+
+        # Check for suspicious amount patterns
+        if current_balance > 1000000:  # Large amounts require additional verification
+            if not account_data.get('large_amount_verified', False):
+                violations.append("Large balance amount not independently verified")
+
+        # Verify currency conversion amounts
+        if account_data.get('currency') != 'AED' and account_data.get('fx_conversion_complete'):
+            converted_amount = account_data.get('converted_aed_amount', 0)
+            if converted_amount <= 0 and current_balance > 0:
+                violations.append("Foreign currency conversion amount missing or invalid")
+
+        if violations:
+            result.update({
+                'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                'violations': violations,
+                'priority': Priority.MEDIUM.value,
+                'risk_level': RiskLevel.MEDIUM.value,
+                'action': 'Verify and reconcile financial amounts'
+            })
+
+            if self.llm_available:
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Amount Verification")
+
+        return result
+
+
+# Agent 11: Claims Detection Agent - Outstanding Claims Management
+class ClaimsDetectionAgent(ComplianceAgent):
+    """
+    Purpose: Detects and manages outstanding customer claims per CBUAE Article 4
+    Functionality: Identifies pending claims, validates claim processing, and ensures timely resolution
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'claims_detection_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'CBUAE Art. 4 - Claims Processing'
+        }
+
+        claim_status = account_data.get('claim_status')
+        violations = []
+
+        if claim_status == 'pending':
+            claim_id = account_data.get('claim_id', 'Unknown')
+            violations.append(f"Outstanding claim (ID: {claim_id}) pending resolution")
+
+            # Check claim documentation
+            if not account_data.get('claim_documentation_complete', False):
+                violations.append("Claim documentation incomplete")
+
+            # Check claim investigation status
+            if not account_data.get('claim_investigation_started', False):
+                violations.append("Claim investigation not initiated")
+
+        elif claim_status == 'under_review':
+            review_start_date = account_data.get('claim_review_start_date')
+            if review_start_date:
+                if isinstance(review_start_date, str):
+                    review_start_date = datetime.fromisoformat(review_start_date.replace('Z', '+00:00'))
+
+                if isinstance(review_start_date, datetime):
+                    days_in_review = (datetime.now() - review_start_date).days
+                    if days_in_review > 45:  # Extended review period
+                        violations.append(f"Claim under review for {days_in_review} days")
+
+        # Check for multiple claims on same account
+        claim_count = account_data.get('total_claims_count', 0)
+        if claim_count > 1:
+            violations.append(f"Multiple claims ({claim_count}) on single account require coordination")
+
+        if violations:
+            result.update({
+                'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                'violations': violations,
+                'priority': Priority.HIGH.value,
+                'risk_level': RiskLevel.MEDIUM.value,
+                'action': 'Expedite claim processing and resolution'
+            })
+
+            if self.llm_available:
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 4")
+
+        return result
+
+
+# Agent 12: Flag Instructions Agent - System Flag Management
+class FlagInstructionsAgent(ComplianceAgent):
+    """
+    Purpose: Manages system flags and special instructions for account handling
+    Functionality: Processes flagging instructions, special handling requirements, and alert management
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'flag_instructions_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'Internal Flag Management'
+        }
+
+        violations = []
+
+        # Check for manual review flags
+        if account_data.get('requires_manual_review_flag', False):
+            violations.append("Account flagged for manual review - requires immediate attention")
+
+        # Check for legal hold flags
+        if account_data.get('legal_hold_flag', False):
+            if not account_data.get('legal_hold_documentation', False):
+                violations.append("Legal hold flag active but documentation missing")
+
+        # Check for high-risk customer flags
+        if account_data.get('high_risk_customer_flag', False):
+            if not account_data.get('enhanced_due_diligence_complete', False):
+                violations.append("High-risk customer requires enhanced due diligence")
+
+        # Check for regulatory reporting flags
+        if account_data.get('regulatory_reporting_flag', False):
+            last_report_date = account_data.get('last_regulatory_report_date')
+            if not last_report_date:
+                violations.append("Regulatory reporting flag active but no reports generated")
+
+        # Check for dormancy processing flags
+        if account_data.get('dormancy_status') == 'dormant':
+            if not account_data.get('dormancy_processing_flag', False):
+                violations.append("Dormant account missing dormancy processing flag")
+
+        # Process any pending flag instructions
+        flag_instruction = account_data.get('pending_flag_instruction')
+        if flag_instruction:
+            logger.info(f"Processing flag instruction for account {account_data.get('account_id')}: {flag_instruction}")
+            result['action'] = f"Process flag instruction: {flag_instruction}"
+
+        if violations:
+            result.update({
+                'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                'violations': violations,
+                'priority': Priority.HIGH.value,
+                'risk_level': RiskLevel.MEDIUM.value,
+                'action': 'Address flagged conditions and update flag status'
+            })
+
+            if self.llm_available:
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Flag Management")
+
+        return result
+
+
+# Agent 13: Risk Assessment Agent - Compliance Risk Evaluation
+class ComplianceRiskAssessmentAgent(ComplianceAgent):
+    """
+    Purpose: Assesses overall compliance risk based on multiple factors
+    Functionality: Evaluates financial, operational, and regulatory risks for comprehensive assessment
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'compliance_risk_assessment_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'Internal Risk Management Framework'
+        }
+
+        violations = []
+        risk_factors = []
+        risk_score = 0
+
+        balance = account_data.get('balance_current', 0) or account_data.get('balance', 0)
+        dormancy_status = account_data.get('dormancy_status')
+
+        # High-value account risk
+        if balance > 500000:
+            risk_factors.append("High-value account")
+            risk_score += 3
+
+            if dormancy_status == 'dormant' and not account_data.get('is_eligible_for_cb_transfer'):
+                violations.append(f"High-value dormant account (AED {balance:,.2f}) poses significant risk")
+                risk_score += 5
+
+        # Customer type risk
+        customer_type = account_data.get('customer_type', 'individual')
+        if customer_type == 'corporate' and balance > 100000:
+            risk_factors.append("High-value corporate account")
+            risk_score += 2
+
+        # Geographic risk
+        customer_country = account_data.get('customer_country', 'UAE')
+        high_risk_countries = ['Unknown', 'Sanctioned', 'High-Risk']
+        if customer_country in high_risk_countries:
+            risk_factors.append("High-risk geographic location")
+            risk_score += 4
+
+        # Process delay risk
+        if account_data.get('dormancy_status') == 'dormant':
+            dormancy_trigger_date = account_data.get('dormancy_trigger_date')
+            if dormancy_trigger_date:
+                if isinstance(dormancy_trigger_date, str):
+                    dormancy_trigger_date = datetime.fromisoformat(dormancy_trigger_date.replace('Z', '+00:00'))
+
+                if isinstance(dormancy_trigger_date, datetime):
+                    days_dormant = (datetime.now() - dormancy_trigger_date).days
+                    if days_dormant > 730:  # Over 2 years dormant
+                        risk_factors.append("Extended dormancy period")
+                        risk_score += 3
+
+        # Multiple violation risk
+        if dormancy_results and isinstance(dormancy_results, dict):
+            violation_count = len([r for r in dormancy_results.values()
+                                   if isinstance(r, dict) and r.get('violations')])
+            if violation_count > 3:
+                risk_factors.append("Multiple compliance violations")
+                risk_score += violation_count
+
+        # Determine risk level
+        if risk_score >= 10:
+            result['risk_level'] = RiskLevel.CRITICAL.value
+            result['priority'] = Priority.CRITICAL.value
+        elif risk_score >= 7:
+            result['risk_level'] = RiskLevel.HIGH.value
+            result['priority'] = Priority.HIGH.value
+        elif risk_score >= 4:
+            result['risk_level'] = RiskLevel.MEDIUM.value
+            result['priority'] = Priority.MEDIUM.value
+
+        if risk_score >= 7:
+            violations.append(f"High compliance risk (score: {risk_score}) - {', '.join(risk_factors)}")
+            result.update({
+                'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                'violations': violations,
+                'action': 'Implement enhanced monitoring and risk mitigation measures'
+            })
+
+            if self.llm_available:
+                result['recommendation'] = self.get_llm_recommendation(
+                    f"Risk score: {risk_score}, Factors: {', '.join(risk_factors)}",
+                    "Compliance Risk Management"
+                )
+
+        result['risk_score'] = risk_score
+        result['risk_factors'] = risk_factors
+
+        return result
+
+
+# Agent 14: Regulatory Reporting Agent - CBUAE Reporting Compliance
+class RegulatoryReportingAgent(ComplianceAgent):
+    """
+    Purpose: Ensures compliance with CBUAE regulatory reporting requirements
+    Functionality: Validates reporting schedules, content accuracy, and submission timelines
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'regulatory_reporting_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'CBUAE Art. 3.10 - Regulatory Reporting'
+        }
+
+        violations = []
+
+        if account_data.get('dormancy_status') == 'dormant':
+            # Check annual CBUAE report inclusion
+            last_report_date = account_data.get('last_cbuae_report_inclusion_date')
+            if last_report_date:
+                if isinstance(last_report_date, str):
+                    last_report_date = datetime.fromisoformat(last_report_date.replace('Z', '+00:00'))
+
+                if isinstance(last_report_date, datetime):
+                    days_since_report = (datetime.now() - last_report_date).days
+                    if days_since_report > 365:
+                        violations.append(f"Not included in CBUAE report for {days_since_report} days")
+            else:
+                violations.append("No record of CBUAE report inclusion")
+
+            # Check quarterly reporting for high-value accounts
+            balance = account_data.get('balance_current', 0)
+            if balance > 100000:
+                last_quarterly_report = account_data.get('last_quarterly_report_date')
+                if last_quarterly_report:
+                    if isinstance(last_quarterly_report, str):
+                        last_quarterly_report = datetime.fromisoformat(last_quarterly_report.replace('Z', '+00:00'))
+
+                    if isinstance(last_quarterly_report, datetime):
+                        days_since_quarterly = (datetime.now() - last_quarterly_report).days
+                        if days_since_quarterly > 95:  # Over a quarter
+                            violations.append("High-value account missing quarterly report")
+
+        # Check transfer reporting
+        if account_data.get('transferred_to_cb_date'):
+            if not account_data.get('transfer_reported_to_cbuae', False):
+                violations.append("Central Bank transfer not reported to CBUAE")
+
+        # Check claim reporting
+        if account_data.get('claim_status') in ['pending', 'resolved']:
+            if not account_data.get('claim_reported_to_cbuae', False):
+                violations.append("Customer claim not reported to CBUAE")
+
+        if violations:
+            result.update({
+                'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                'violations': violations,
+                'priority': Priority.MEDIUM.value,
+                'risk_level': RiskLevel.MEDIUM.value,
+                'action': 'Submit required regulatory reports to CBUAE'
+            })
+
+            if self.llm_available:
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 3.10")
+
+        return result
+
+
+# Agent 15: Audit Trail Agent - Audit Documentation
+class AuditTrailAgent(ComplianceAgent):
+    """
+    Purpose: Ensures comprehensive audit trail maintenance for all account activities
+    Functionality: Validates audit log completeness, data integrity, and retention compliance
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'audit_trail_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'Internal Audit Requirements'
+        }
+
+        violations = []
+
+        # Check basic audit log presence
+        if not account_data.get('audit_log_complete', True):
+            violations.append("Comprehensive audit trail missing or incomplete")
+
+        # Check audit log entries for key events
+        if account_data.get('dormancy_status') == 'dormant':
+            if not account_data.get('dormancy_classification_logged', False):
+                violations.append("Dormancy classification event not logged")
+
+            if account_data.get('contact_attempts_made', 0) > 0:
+                if not account_data.get('contact_attempts_logged', False):
+                    violations.append("Contact attempts not properly logged")
+
+        # Check transfer audit trail
+        if account_data.get('is_eligible_for_cb_transfer'):
+            if not account_data.get('transfer_eligibility_logged', False):
+                violations.append("Transfer eligibility determination not logged")
+
+        if account_data.get('transferred_to_cb_date'):
+            if not account_data.get('transfer_completion_logged', False):
+                violations.append("Transfer completion not logged")
+
+        # Check modification audit trail
+        last_modified_date = account_data.get('last_modified_date')
+        last_modified_by = account_data.get('last_modified_by')
+
+        if last_modified_date and not last_modified_by:
+            violations.append("Account modification not properly attributed")
+
+        # Check retention compliance
+        account_creation_date = account_data.get('created_date')
+        if account_creation_date:
+            if isinstance(account_creation_date, str):
+                account_creation_date = datetime.fromisoformat(account_creation_date.replace('Z', '+00:00'))
+
+            if isinstance(account_creation_date, datetime):
+                account_age_years = (datetime.now() - account_creation_date).days / 365
+                if account_age_years > 7 and not account_data.get('long_term_retention_approved', False):
+                    violations.append(f"Account records {account_age_years:.1f} years old - retention review required")
+
+        if violations:
+            result.update({
+                'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                'violations': violations,
+                'priority': Priority.MEDIUM.value,
+                'risk_level': RiskLevel.MEDIUM.value,
+                'action': 'Complete audit trail documentation and address gaps'
+            })
+
+            if self.llm_available:
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Audit Trail Management")
+
+        return result
+
+
+# Agent 16: Action Generation Agent - Remediation Action Planning
+class ActionGenerationAgent(ComplianceAgent):
+    """
+    Purpose: Generates specific remediation actions based on compliance violations
+    Functionality: Creates actionable tasks, assigns priorities, and schedules follow-up activities
+    """
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'action_generation_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'Internal Action Management'
+        }
+
+        generated_actions = []
+        priority_actions = []
+
+        # Analyze dormancy results to generate actions
+        if dormancy_results and isinstance(dormancy_results, dict):
+            for agent_name, agent_result in dormancy_results.items():
+                if isinstance(agent_result, dict) and agent_result.get('violations'):
+                    agent_priority = agent_result.get('priority', Priority.LOW.value)
+                    agent_action = agent_result.get('action')
+
+                    if agent_action:
+                        action_item = {
+                            'action': agent_action,
+                            'source_agent': agent_name,
+                            'priority': agent_priority,
+                            'due_date': self._calculate_due_date(agent_priority),
+                            'assigned_to': self._determine_assignee(agent_name),
+                            'violation_count': len(agent_result['violations'])
+                        }
+                        generated_actions.append(action_item)
+
+                        if agent_priority in [Priority.HIGH.value, Priority.CRITICAL.value]:
+                            priority_actions.append(action_item)
+
+        # Generate consolidated action plan
+        if generated_actions:
+            result['generated_actions'] = generated_actions
+            result['priority_actions'] = priority_actions
+
+            total_actions = len(generated_actions)
+            high_priority_count = len(priority_actions)
+
+            if high_priority_count > 0:
+                violation_msg = f"Generated {total_actions} remediation actions ({high_priority_count} high priority)"
+                result.update({
+                    'compliance_status': ComplianceStatus.NON_COMPLIANT.value,
+                    'violations': [violation_msg],
+                    'priority': Priority.HIGH.value,
+                    'risk_level': RiskLevel.HIGH.value,
+                    'action': f"Execute {high_priority_count} high-priority actions immediately"
+                })
+
+                if self.llm_available:
+                    action_summary = "; ".join([a['action'] for a in priority_actions[:3]])
+                    result['recommendation'] = self.get_llm_recommendation(
+                        f"High-priority actions: {action_summary}",
+                        "Action Planning"
+                    )
+
+        return result
+
+    def _calculate_due_date(self, priority: str) -> str:
+        """Calculate due date based on priority level"""
+        now = datetime.now()
+        if priority == Priority.CRITICAL.value:
+            due_date = now + timedelta(hours=24)
+        elif priority == Priority.HIGH.value:
+            due_date = now + timedelta(days=3)
+        elif priority == Priority.MEDIUM.value:
+            due_date = now + timedelta(days=7)
         else:
-            not_compliant_policy = pd.DataFrame()
-            compliant_policy = pd.DataFrame()
+            due_date = now + timedelta(days=14)
 
-        # Combine compliant: Policy-compliant records and CBUAE transferred (perpetual)
-        compliant_df = pd.concat([compliant_policy, cbuae_transferred]).drop_duplicates(subset=['Account_ID'])
+        return due_date.isoformat()
 
-        count = len(not_compliant_policy)
-        desc = f"Records potentially not compliant with retention policy (Art. 3.9): {count} records"
-        return not_compliant_policy, compliant_df, desc
-    except Exception as e:
-        return pd.DataFrame(), pd.DataFrame(), f"(Error in Record Retention Compliance check: {e})"
+    def _determine_assignee(self, agent_name: str) -> str:
+        """Determine appropriate assignee based on agent type"""
+        if 'contact' in agent_name:
+            return 'Customer Relations Team'
+        elif 'transfer' in agent_name:
+            return 'Transfer Processing Team'
+        elif 'documentation' in agent_name:
+            return 'Documentation Team'
+        elif 'reporting' in agent_name:
+            return 'Regulatory Reporting Team'
+        elif 'risk' in agent_name:
+            return 'Risk Management Team'
+        else:
+            return 'Compliance Team'
 
 
-def run_all_compliance_checks(df, general_threshold_date, freeze_threshold_date, cbuae_cutoff_date_ignored=None,
-                              agent_name="ComplianceSystem"):
+# Agent 17: Final Verification Agent - Comprehensive Validation
+class FinalVerificationAgent(ComplianceAgent):
     """
-    Run all compliance checks.
-    'cbuae_cutoff_date' is not directly used here as 'detect_cbuae_transfer_candidates' relies on a pre-set flag.
-    'general_threshold_date' is for 'detect_unflagged_dormant_candidates'.
-    'freeze_threshold_date' is for 'detect_statement_freeze_candidates'.
+    Purpose: Performs final comprehensive validation of all compliance checks
+    Functionality: Cross-validates results, identifies conflicts, and provides overall assessment
     """
-    results = {
-        "total_accounts_processed": len(df),
-        "incomplete_contact": {},
-        "flag_candidates": {},
-        "ledger_candidates_internal": {},
-        "statement_freeze_needed": {},
-        "transfer_candidates_cb": {},
-        "fx_conversion_needed": {},
-        "sdb_court_application": {},
-        "unclaimed_instruments_ledger": {},
-        "claims_processing_pending": {},
-        "annual_cbuae_report": {},
-        "record_retention_check": {},
-        "flag_logging_status": {}
+
+    def execute(self, account_data: Dict, dormancy_results: Dict = None) -> Dict:
+        result = {
+            'agent': 'final_verification_agent',
+            'compliance_status': ComplianceStatus.COMPLIANT.value,
+            'violations': [],
+            'action': None,
+            'priority': Priority.LOW.value,
+            'risk_level': RiskLevel.LOW.value,
+            'recommendation': None,
+            'regulatory_citation': 'Comprehensive Compliance Validation'
+        }
+
+        violations = []
+        verification_summary = {}
+
+        if dormancy_results and isinstance(dormancy_results, dict):
+            # Analyze overall compliance status
+            statuses = []
+            all_violations = []
+            risk_levels = []
+            priorities = []
+
+            for agent_name, agent_result in dormancy_results.items():
+                if isinstance(agent_result, dict):
+                    status = agent_result.get('compliance_status')
+                    if status:
+                        statuses.append(status)
+
+                    agent_violations = agent_result.get('violations', [])
+                    all_violations.extend(agent_violations)
+
+                    risk_level = agent_result.get('risk_level')
+                    if risk_level:
+                        risk_levels.append(risk_level)
+
+                    priority = agent_result.get('priority')
+                    if priority:
+                        priorities.append(priority)
+
+            # Generate verification summary
+            verification_summary = {
+                'total_agents_executed': len([r for r in dormancy_results.values() if isinstance(r, dict)]),
+                'compliant_agents': len([s for s in statuses if s == ComplianceStatus.COMPLIANT.value]),
+                'non_compliant_agents': len([s for s in statuses if s == ComplianceStatus.NON_COMPLIANT.value]),
+                'critical_violations': len([s for s in statuses if s == ComplianceStatus.CRITICAL_VIOLATION.value]),
+                'total_violations': len(all_violations),
+                'highest_risk_level': max(risk_levels) if risk_levels else RiskLevel.LOW.value,
+                'highest_priority': max(priorities) if priorities else Priority.LOW.value
+            }
+
+            # Check for conflicting results
+            if ComplianceStatus.COMPLIANT.value in statuses and ComplianceStatus.CRITICAL_VIOLATION.value in statuses:
+                violations.append("Conflicting compliance statuses detected across agents")
+
+            # Validate data consistency
+            if account_data.get('dormancy_status') == 'dormant':
+                dormancy_agents = ['article_2_compliance_agent', 'article_3_1_process_compliance_agent']
+                dormancy_violations = any(
+                    dormancy_results.get(agent, {}).get('violations') for agent in dormancy_agents
+                )
+                if not dormancy_violations:
+                    violations.append("Dormant account shows no violations in core dormancy agents")
+
+            # Check transfer consistency
+            if account_data.get('is_eligible_for_cb_transfer'):
+                transfer_agents = ['article_3_4_transfer_compliance_agent', 'fx_conversion_check_agent']
+                transfer_ready = all(
+                    not dormancy_results.get(agent, {}).get('violations') for agent in transfer_agents
+                )
+                if not transfer_ready and not account_data.get('transferred_to_cb_date'):
+                    violations.append("Transfer-eligible account has unresolved transfer compliance issues")
+
+            # Overall compliance determination
+            if verification_summary.get('critical_violations', 0) > 0:
+                overall_status = ComplianceStatus.CRITICAL_VIOLATION.value
+                overall_priority = Priority.CRITICAL.value
+                overall_risk = RiskLevel.CRITICAL.value
+            elif verification_summary.get('non_compliant_agents', 0) > verification_summary.get('compliant_agents', 0):
+                overall_status = ComplianceStatus.NON_COMPLIANT.value
+                overall_priority = Priority.HIGH.value
+                overall_risk = RiskLevel.HIGH.value
+            elif verification_summary.get('non_compliant_agents', 0) > 0:
+                overall_status = ComplianceStatus.PARTIAL_COMPLIANT.value
+                overall_priority = Priority.MEDIUM.value
+                overall_risk = RiskLevel.MEDIUM.value
+            else:
+                overall_status = ComplianceStatus.COMPLIANT.value
+                overall_priority = Priority.LOW.value
+                overall_risk = RiskLevel.LOW.value
+
+            if violations or overall_status != ComplianceStatus.COMPLIANT.value:
+                if not violations:
+                    violations = [f"Overall compliance status: {overall_status}"]
+
+                result.update({
+                    'compliance_status': overall_status,
+                    'violations': violations,
+                    'priority': overall_priority,
+                    'risk_level': overall_risk,
+                    'action': 'Address compliance issues identified in verification summary'
+                })
+
+                if self.llm_available:
+                    summary_text = json.dumps(verification_summary, indent=2)
+                    result['recommendation'] = self.get_llm_recommendation(
+                        f"Verification Summary: {summary_text}",
+                        "Final Verification"
+                    )
+
+        result['verification_summary'] = verification_summary
+        return result
+
+
+# =============================================================================
+# Master Orchestrator for All 17 Compliance Verification Agents
+# =============================================================================
+
+class ComplianceOrchestrator:
+    """
+    Master orchestrator managing all 17 compliance verification agents
+    """
+
+    # Complete mapping of all 17 agents
+    AGENT_CLASS_MAP = {
+        'article_2_compliance_agent': Article2ComplianceAgent,
+        'article_3_1_process_compliance_agent': Article31ProcessComplianceAgent,
+        'article_3_4_transfer_compliance_agent': Article34TransferComplianceAgent,
+        'contact_verification_agent': ContactVerificationAgent,
+        'transfer_eligibility_agent': TransferEligibilityAgent,
+        'fx_conversion_check_agent': FXConversionCheckAgent,
+        'process_management_agent': ProcessManagementAgent,
+        'documentation_review_agent': DocumentationReviewAgent,
+        'timeline_compliance_agent': TimelineComplianceAgent,
+        'amount_verification_agent': AmountVerificationAgent,
+        'claims_detection_agent': ClaimsDetectionAgent,
+        'flag_instructions_agent': FlagInstructionsAgent,
+        'compliance_risk_assessment_agent': ComplianceRiskAssessmentAgent,
+        'regulatory_reporting_agent': RegulatoryReportingAgent,
+        'audit_trail_agent': AuditTrailAgent,
+        'action_generation_agent': ActionGenerationAgent,
+        'final_verification_agent': FinalVerificationAgent,
     }
-    df_copy = df.copy()  # Work on a copy to avoid modifying original df
 
-    # Run all the compliance checks
-    results["incomplete_contact"]["df"], results["incomplete_contact"]["count"], results["incomplete_contact"]["desc"] = \
-        detect_incomplete_contact_attempts(df_copy)
-
-    results["flag_candidates"]["df"], results["flag_candidates"]["count"], results["flag_candidates"]["desc"] = \
-        detect_flag_candidates(df_copy, general_threshold_date)
-
-    # Log if unflagged candidates found
-    if results["flag_candidates"]["count"] > 0 and 'Account_ID' in results["flag_candidates"]["df"].columns:
-        ids_to_log = results["flag_candidates"]["df"]['Account_ID'].tolist()
-        # Determine threshold_days based on general_threshold_date for logging
-        # This is an approximation for the log; individual records might have different effective thresholds (e.g. instruments)
-        log_threshold_days = (datetime.now() - general_threshold_date).days
-        status, msg = log_flag_instructions(ids_to_log, agent_name, log_threshold_days)
-        results["flag_logging_status"] = {"status": status, "message": msg}
-    else:
-        results["flag_logging_status"] = {"status": True,
-                                          "message": "No unflagged candidates to log or Account_ID missing."}
-
-    results["ledger_candidates_internal"]["df"], results["ledger_candidates_internal"]["count"], \
-        results["ledger_candidates_internal"]["desc"] = \
-        detect_ledger_candidates(df_copy)
-
-    results["statement_freeze_needed"]["df"], results["statement_freeze_needed"]["count"], \
-        results["statement_freeze_needed"]["desc"] = \
-        detect_freeze_candidates(df_copy, freeze_threshold_date)
-
-    results["transfer_candidates_cb"]["df"], results["transfer_candidates_cb"]["count"], \
-        results["transfer_candidates_cb"]["desc"] = \
-        detect_transfer_candidates_to_cb(df_copy)  # Relies on 'Expected_Transfer_to_CB_Due'
-
-    results["fx_conversion_needed"]["df"], results["fx_conversion_needed"]["count"], results["fx_conversion_needed"][
-        "desc"] = \
-        detect_foreign_currency_conversion_needed(df_copy)
-
-    results["sdb_court_application"]["df"], results["sdb_court_application"]["count"], results["sdb_court_application"][
-        "desc"] = \
-        detect_sdb_court_application_needed(df_copy)
-
-    results["unclaimed_instruments_ledger"]["df"], results["unclaimed_instruments_ledger"]["count"], \
-        results["unclaimed_instruments_ledger"]["desc"] = \
-        detect_unclaimed_payment_instruments_ledger(df_copy)
-
-    results["claims_processing_pending"]["df"], results["claims_processing_pending"]["count"], \
-        results["claims_processing_pending"]["desc"] = \
-        detect_claim_processing_pending(df_copy)
-
-    results["annual_cbuae_report"]["df"], results["annual_cbuae_report"]["count"], results["annual_cbuae_report"][
-        "desc"] = \
-        generate_annual_cbuae_report_summary(df_copy)
-
-    # Special handling for record retention which returns two dataframes
-    not_compliant_df, compliant_df, retention_desc = check_record_retention_compliance(df_copy)
-    results["record_retention_check"] = {
-        "df": not_compliant_df,
-        "compliant_df": compliant_df,
-        "count": len(not_compliant_df),
-        "desc": retention_desc
-    }
-
-    return results
+# --- END OF COMPLETE 17 COMPLIANCE VERIFICATION AGENTS ---
