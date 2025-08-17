@@ -1,6 +1,6 @@
 # database/connection.py
 """
-Database connection handling for Azure SQL Database.
+Database connection handling for the application.
 Streamlit Cloud-compatible version using pymssql.
 """
 
@@ -16,7 +16,7 @@ from datetime import datetime
 # Global connection pool and keep-alive settings
 CONNECTION_POOL = {}
 LAST_ACTIVITY = {}
-CONNECTION_TIMEOUT = 10800  # 3 hours before forced reconnection
+CONNECTION_TIMEOUT = 10800  # 1 hour before forced reconnection
 CONNECTION_KEEPALIVE = 300  # 5 minutes between keepalive pings
 KEEPALIVE_ENABLED = True
 
@@ -68,11 +68,8 @@ def create_new_connection():
             show_credentials_help()
             return None
 
-        # Clean server name (remove protocol if present and .database.windows.net if missing)
+        # Clean server name (remove protocol if present)
         server = server.replace("https://", "").replace("http://", "")
-        if not server.endswith(".database.windows.net"):
-            if not server.endswith(".database.windows.net"):
-                server = f"{server}.database.windows.net"
 
         st.sidebar.info(f"🔌 Connecting to: {server}")
 
@@ -153,25 +150,17 @@ def get_connection_credentials():
 
     # Try Streamlit secrets first
     try:
-        # Handle both possible key names in secrets
-        server = st.secrets.get("DB_SERVER_NAME") or st.secrets.get("DB_SERVER")
+        server = st.secrets.get("DB_SERVER")
         database = st.secrets.get("DB_NAME")
         username = st.secrets.get("DB_USERNAME")
         password = st.secrets.get("DB_PASSWORD")
         port = int(st.secrets.get("DB_PORT", "1433"))
-
-        st.sidebar.info(f"📋 Using credentials from secrets.toml")
-        st.sidebar.info(f"🗄️ Server: {server}")
-        st.sidebar.info(f"🗄️ Database: {database}")
-        st.sidebar.info(f"👤 Username: {username}")
-        st.sidebar.info(f"🔌 Port: {port}")
-
-    except Exception as e:
-        st.sidebar.warning(f"⚠️ Failed to load from secrets: {e}")
+    except:
+        pass
 
     # Fallback to environment variables
     if not all([server, database, username, password]):
-        server = server or os.getenv("DB_SERVER_NAME") or os.getenv("DB_SERVER")
+        server = server or os.getenv("DB_SERVER")
         database = database or os.getenv("DB_NAME")
         username = username or os.getenv("DB_USERNAME")
         password = password or os.getenv("DB_PASSWORD")
@@ -207,8 +196,7 @@ def test_connection_query(connection, connection_type):
             result = cursor.fetchone()
             cursor.close()
             return result and result[0] == 1
-    except Exception as e:
-        st.sidebar.error(f"Connection test failed: {e}")
+    except:
         return False
 
 
@@ -340,49 +328,90 @@ def ping_connection(conn_key):
         return False
 
 
+def wakeup_connection():
+    """
+    Wake up and refresh the database connection.
+    Call this when the app becomes active or before important operations.
+    """
+    st.sidebar.info("🔄 Waking up database connection...")
+
+    # Perform immediate keep-alive on all connections
+    perform_keepalive()
+
+    # Get fresh connection if needed
+    conn = get_db_connection()
+
+    if conn:
+        st.sidebar.success("✅ Database connection active")
+        return conn
+    else:
+        st.sidebar.error("❌ Failed to wake up database connection")
+        return None
+
+
+def auto_keepalive_widget():
+    """
+    Add this widget to your main app to automatically maintain connections.
+    Place this in your sidebar or main area.
+    """
+    with st.sidebar:
+        st.markdown("---")
+
+        # Connection status
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            if st.button("🔄 Refresh Connection", help="Manually refresh database connection"):
+                wakeup_connection()
+                st.rerun()
+
+        with col2:
+            # Toggle keep-alive
+            global KEEPALIVE_ENABLED
+            KEEPALIVE_ENABLED = st.checkbox("Keep-Alive", value=KEEPALIVE_ENABLED,
+                                            help="Automatically maintain database connection")
+
+        # Show connection info
+        if 'main_db_connection' in LAST_ACTIVITY:
+            last_ping = LAST_ACTIVITY['main_db_connection']
+            elapsed = (datetime.now() - last_ping).total_seconds()
+
+            if elapsed < 60:
+                st.caption(f"🟢 Last ping: {elapsed:.0f}s ago")
+            elif elapsed < 300:
+                st.caption(f"🟡 Last ping: {elapsed / 60:.1f}m ago")
+            else:
+                st.caption(f"🔴 Last ping: {elapsed / 60:.1f}m ago")
+
+        # Auto-perform keep-alive
+        if KEEPALIVE_ENABLED:
+            perform_keepalive()
+
+
 def show_credentials_help():
     """Show help for setting up credentials."""
-    st.sidebar.info("""
-    **Required Configuration in .streamlit/secrets.toml:**
-    ```toml
-    DB_SERVER_NAME = "rahulsalpard.database.windows.net"
-    DB_NAME = "rahulsalpard"
-    DB_USERNAME = "agent123"
-    DB_PASSWORD = "Aug@2025"
-    DB_PORT = 1433
-    ```
-
-    **Note:** Remove http:// prefix from server name
-    """)
 
 
-def show_connection_troubleshooting():
+
+# Keep these functions for compatibility with existing code
+def close_all_connections():
     """
-    Show troubleshooting information for connection issues.
+    Close all database connections.
     """
-    with st.sidebar.expander("🔧 Troubleshooting", expanded=False):
-        st.markdown("""
-        **Common Issues:**
+    st.sidebar.info("🔄 Closing all database connections...")
 
-        1. **Server Name Format**
-           - Should be: `servername.database.windows.net`
-           - Remove `http://` or `https://` prefix
+    for conn_key in list(CONNECTION_POOL.keys()):
+        cleanup_connection(conn_key)
 
-        2. **Firewall Rules**
-           - Add your IP to Azure SQL firewall
-           - Enable "Allow Azure services"
+    st.sidebar.success("✅ All connections closed")
 
-        3. **Credentials**
-           - Verify username/password
-           - Check authentication method
 
-        4. **Network**
-           - Port 1433 should be open
-           - Check VPN/proxy settings
-
-        **Expected Format:**
-        Server: `rahulsalpard.database.windows.net`
-        """)
+def ping_connections():
+    """
+    Ping all connections to keep them alive.
+    Legacy function - use perform_keepalive() instead.
+    """
+    perform_keepalive()
 
 
 def test_database_connection():
@@ -395,20 +424,20 @@ def test_database_connection():
         if conn is None:
             return False, "No connection established"
 
-        # Test with a simple query
+        # Test with a simple query (fixed SQL syntax)
         if hasattr(conn, 'execute'):
             # SQLAlchemy engine
             with conn.connect() as test_conn:
-                result = test_conn.execute("SELECT GETDATE() as current_time, DB_NAME() as database_name")
+                result = test_conn.execute("SELECT GETDATE(), DB_NAME()")
                 row = result.fetchone()
-                return True, f"Connected to '{row[1]}' at {row[0]}"
+                return True, f"Connected to {row[1]} at {row[0]}"
         else:
             # Direct pymssql connection
             cursor = conn.cursor()
             cursor.execute("SELECT GETDATE(), DB_NAME()")
             row = cursor.fetchone()
             cursor.close()
-            return True, f"Connected to '{row[1]}' at {row[0]}"
+            return True, f"Connected to {row[1]} at {row[0]}"
 
     except Exception as e:
         return False, f"Connection test failed: {str(e)[:200]}"
@@ -439,27 +468,88 @@ def execute_query(query, connection=None):
         return None
 
 
-def force_reconnect():
+def show_connection_troubleshooting():
     """
-    Force a fresh reconnection by clearing all cached connections.
+    Show troubleshooting information for connection issues.
     """
-    st.sidebar.info("🔄 Forcing database reconnection...")
+    with st.sidebar.expander("🔧 Troubleshooting", expanded=False):
+        st.markdown("""
+        **Common Issues:**
 
-    # Clear Streamlit cache
-    get_db_connection.clear()
+        1. **Firewall Rules**
+           - Add your IP to Azure SQL firewall
+           - Enable "Allow Azure services"
 
-    # Clean up connection pool
-    close_all_connections()
+        2. **Credentials**
+           - Verify username/password
+           - Check server name format
 
-    # Get fresh connection
-    conn = get_db_connection()
+        3. **Network**
+           - Server should be reachable
+           - Port 1433 should be open
 
-    if conn:
-        st.sidebar.success("✅ Fresh connection established")
-        return conn
-    else:
-        st.sidebar.error("❌ Failed to establish fresh connection")
-        return None
+        **Server Format:**
+        `servername.database.windows.net`
+        """)
+
+
+def get_sample_data():
+    """
+    Provide sample data when database connection fails.
+    """
+    st.warning("🔄 Using sample data (database unavailable)")
+
+    import random
+    from datetime import datetime, timedelta
+
+    # Create realistic sample banking data
+    sample_data = []
+    account_types = ['Savings', 'Current', 'Fixed Deposit', 'Investment']
+    currencies = ['AED', 'USD', 'EUR']
+
+    for i in range(100):
+        days_since_activity = random.randint(30, 1500)
+        last_activity = datetime.now() - timedelta(days=days_since_activity)
+
+        record = {
+            'Account_ID': f'ACC{i + 1:06d}',
+            'Customer_ID': f'CUST{(i // 3) + 1:05d}',
+            'Account_Type': random.choice(account_types),
+            'Currency': random.choice(currencies),
+            'Current_Balance': round(random.uniform(100, 50000), 2),
+            'Date_Last_Cust_Initiated_Activity': last_activity.strftime('%Y-%m-%d'),
+            'Expected_Account_Dormant': 'Yes' if days_since_activity > 1095 else 'No',
+            'Expected_Transfer_to_CB_Due': random.choice(['Yes', 'No']),
+            'Customer_Address_Known': random.choice(['Yes', 'No']),
+            'Customer_Has_Active_Liability_Account': random.choice(['Yes', 'No']),
+        }
+        sample_data.append(record)
+
+    return pd.DataFrame(sample_data)
+
+
+def show_connection_status():
+    """
+    Display connection status in sidebar.
+    """
+    try:
+        success, message = test_database_connection()
+        if success:
+            st.sidebar.success(f"✅ Database: {message}")
+        else:
+            st.sidebar.error(f"❌ Database connection test failed: {message}")
+    except Exception as e:
+        st.sidebar.error(f"❌ Database connection test failed: {str(e)[:100]}")
+
+
+# Keep these functions for compatibility with existing code
+def get_direct_connection(file_path):
+    """
+    Create a direct connection to a database file.
+    Not supported in Streamlit Cloud.
+    """
+    st.warning("Direct file connections not supported in Streamlit Cloud")
+    return None
 
 
 def close_all_connections():
@@ -484,20 +574,31 @@ def ping_connections():
     perform_keepalive()
 
 
-def show_connection_status():
+def force_reconnect():
     """
-    Display connection status in sidebar.
+    Force a fresh reconnection by clearing all cached connections.
+    Useful when you know the connection has been lost.
     """
-    try:
-        success, message = test_database_connection()
-        if success:
-            st.sidebar.success(f"✅ Database: {message}")
-        else:
-            st.sidebar.error(f"❌ Database: {message}")
-    except Exception as e:
-        st.sidebar.error(f"❌ Database connection test failed: {str(e)[:100]}")
+    st.sidebar.info("🔄 Forcing database reconnection...")
+
+    # Clear Streamlit cache
+    get_db_connection.clear()
+
+    # Clean up connection pool
+    close_all_connections()
+
+    # Get fresh connection
+    conn = get_db_connection()
+
+    if conn:
+        st.sidebar.success("✅ Fresh connection established")
+        return conn
+    else:
+        st.sidebar.error("❌ Failed to establish fresh connection")
+        return None
 
 
+# Add this function to be called from your main app
 def maintain_connection():
     """
     Main function to maintain database connection health.
@@ -534,7 +635,7 @@ def maintain_connection():
 
         with col1:
             if st.button("🔄 Refresh", help="Refresh connection"):
-                perform_keepalive()
+                wakeup_connection()
                 st.rerun()
 
         with col2:

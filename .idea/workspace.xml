@@ -4,9 +4,34 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="63761940-712c-4363-bb8e-5dc1b9ff83c9" name="Changes" comment="kubernetes files">
+    <list default="true" id="63761940-712c-4363-bb8e-5dc1b9ff83c9" name="Changes" comment="files">
+      <change beforePath="$PROJECT_DIR$/.env" beforeDir="false" afterPath="$PROJECT_DIR$/.env" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/Banking_Compliance_app.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Banking_Compliance_app.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.streamlit/secrets.toml" beforeDir="false" afterPath="$PROJECT_DIR$/.streamlit/secrets.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/agents/compliance.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/compliance.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/agents/connector.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/connector.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/agents/dormant.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/dormant.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ai/chatbot.py" beforeDir="false" afterPath="$PROJECT_DIR$/ai/chatbot.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ai/llm.py" beforeDir="false" afterPath="$PROJECT_DIR$/ai/llm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ai/visualizations.py" beforeDir="false" afterPath="$PROJECT_DIR$/ai/visualizations.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/auth.py" beforeDir="false" afterPath="$PROJECT_DIR$/auth.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/common/utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/utils.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/data_sync_component.py" beforeDir="false" afterPath="$PROJECT_DIR$/data/data_sync_component.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/data/parser.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/database/azure_connection.py" beforeDir="false" afterPath="$PROJECT_DIR$/data/stubs.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/database/config.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/database/connection.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/connection.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/database/operations.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/operations.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/database/pipelines.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/pipelines.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/database/setup.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/setup.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/database/transfer.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/transfer.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ui/dormant_ui.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/dormant_ui.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ui/sidebar.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/sidebar.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -16,8 +41,8 @@
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
       <list>
-        <option value="Python Script" />
         <option value="Dockerfile" />
+        <option value="Python Script" />
       </list>
     </option>
   </component>
@@ -42,12 +67,12 @@
     &quot;assignee&quot;: &quot;p1nka&quot;
   }
 }</component>
-  <component name="GithubPullRequestsUISettings"><![CDATA[{
-  "selectedUrlAndAccountId": {
-    "url": "https://github.com/p1nka/banking_compliance_app.git",
-    "accountId": "38282e22-dfe6-4fd1-b2ee-019dfb193505"
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/p1nka/banking_compliance_app.git&quot;,
+    &quot;accountId&quot;: &quot;38282e22-dfe6-4fd1-b2ee-019dfb193505&quot;
   }
-}]]></component>
+}</component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 2
 }</component>
@@ -64,6 +89,7 @@
     &quot;ASKED_SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
     &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
     &quot;SHELLCHECK.PATH&quot;: &quot;C:\\Users\\Admin\\AppData\\Roaming\\JetBrains\\PyCharm2025.1\\plugins\\Shell Script\\shellcheck.exe&quot;,
     &quot;git-widget-placeholder&quot;: &quot;master&quot;,
@@ -163,7 +189,23 @@
       <option name="project" value="LOCAL" />
       <updated>1748764012694</updated>
     </task>
-    <option name="localTasksCounter" value="8" />
+    <task id="LOCAL-00008" summary="files">
+      <option name="closed" value="true" />
+      <created>1754842769232</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1754842769232</updated>
+    </task>
+    <task id="LOCAL-00009" summary="files">
+      <option name="closed" value="true" />
+      <created>1754842892551</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1754842892551</updated>
+    </task>
+    <option name="localTasksCounter" value="10" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -185,6 +227,7 @@
     <MESSAGE value="updated dormant.py" />
     <MESSAGE value="updated banking compliance code" />
     <MESSAGE value="kubernetes files" />
-    <option name="LAST_COMMIT_MESSAGE" value="kubernetes files" />
+    <MESSAGE value="files" />
+    <option name="LAST_COMMIT_MESSAGE" value="files" />
   </component>
 </project>

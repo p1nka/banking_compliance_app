@@ -14,6 +14,7 @@ import re
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
 # Constants and Enums
 class ComplianceStatus(Enum):
     COMPLIANT = "compliant"
@@ -92,7 +93,8 @@ class ComplianceAgent:
         self.config = config
         self.llm_available = bool(llm_client)
 
-        if config and hasattr(config, 'rag_system') and hasattr(config.rag_system, 'llm_for_generation'):
+        if self.llm_available and config and hasattr(config, 'rag_system') and hasattr(config.rag_system,
+                                                                                       'llm_for_generation'):
             self.llm_config_gen = config.rag_system.llm_for_generation
             self.llm_provider = self.llm_config_gen.provider.lower() if hasattr(self.llm_config_gen,
                                                                                 'provider') else 'unknown'
@@ -104,7 +106,7 @@ class ComplianceAgent:
 
     def _call_generative_llm(self, user_prompt: str, system_prompt: Optional[str] = None) -> str:
         """Synchronous helper to call the configured generative LLM."""
-        if not self.llm_client:
+        if not self.llm_available:
             return "LLM client not available - using rule-based analysis."
 
         try:
@@ -136,6 +138,9 @@ class ComplianceAgent:
 
     def get_llm_recommendation(self, violation_context: str, article: str = None) -> str:
         """Get AI-powered compliance recommendations."""
+        if not self.llm_available:
+            return "LLM not available for recommendations."
+
         system_prompt = """You are a CBUAE banking compliance expert. Provide specific regulatory analysis, 
         immediate remediation steps, and compliance recommendations for the given violation context."""
 
@@ -204,9 +209,7 @@ class Article2ComplianceAgent(ComplianceAgent):
                     'risk_level': RiskLevel.HIGH.value,
                     'action': 'Flag account as dormant and initiate dormancy procedures'
                 })
-
-                if self.llm_available:
-                    result['recommendation'] = self.get_llm_recommendation(violation, "CBUAE Article 2")
+                result['recommendation'] = self.get_llm_recommendation(violation, "CBUAE Article 2")
 
         return result
 
@@ -263,9 +266,7 @@ class Article31ProcessComplianceAgent(ComplianceAgent):
                     'risk_level': RiskLevel.HIGH.value,
                     'action': f"Complete {required_attempts - contact_attempts} additional contact attempts"
                 })
-
-                if self.llm_available:
-                    result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 3.1")
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 3.1")
 
         return result
 
@@ -318,9 +319,7 @@ class Article34TransferComplianceAgent(ComplianceAgent):
                     'risk_level': RiskLevel.CRITICAL.value,
                     'action': 'Immediately process Central Bank transfer'
                 })
-
-                if self.llm_available:
-                    result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 3.4")
+                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 3.4")
 
         return result
 
@@ -378,9 +377,7 @@ class ContactVerificationAgent(ComplianceAgent):
                 'risk_level': RiskLevel.MEDIUM.value,
                 'action': 'Update customer contact information and retry contact'
             })
-
-            if self.llm_available:
-                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Contact Verification")
+            result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Contact Verification")
 
         return result
 
@@ -438,9 +435,7 @@ class TransferEligibilityAgent(ComplianceAgent):
                     'risk_level': RiskLevel.HIGH.value,
                     'action': 'Mark account as eligible for Central Bank transfer'
                 })
-
-                if self.llm_available:
-                    result['recommendation'] = self.get_llm_recommendation(violation, "Transfer Eligibility")
+                result['recommendation'] = self.get_llm_recommendation(violation, "Transfer Eligibility")
 
             elif not is_eligible and current_eligibility:
                 violation = f"Account marked as transfer eligible but doesn't meet criteria"
@@ -489,9 +484,7 @@ class FXConversionCheckAgent(ComplianceAgent):
                     'risk_level': RiskLevel.MEDIUM.value,
                     'action': f'Convert {currency} balance to AED before transfer'
                 })
-
-                if self.llm_available:
-                    result['recommendation'] = self.get_llm_recommendation(violation, "CBUAE Article 8.5")
+                result['recommendation'] = self.get_llm_recommendation(violation, "CBUAE Article 8.5")
 
         return result
 
@@ -547,9 +540,7 @@ class ProcessManagementAgent(ComplianceAgent):
                 'risk_level': RiskLevel.MEDIUM.value,
                 'action': 'Review and advance process stage appropriately'
             })
-
-            if self.llm_available:
-                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Process Management")
+            result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Process Management")
 
         return result
 
@@ -607,9 +598,7 @@ class DocumentationReviewAgent(ComplianceAgent):
                 'risk_level': RiskLevel.MEDIUM.value,
                 'action': 'Complete missing documentation and update records'
             })
-
-            if self.llm_available:
-                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Documentation Standards")
+            result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Documentation Standards")
 
         return result
 
@@ -689,9 +678,7 @@ class TimelineComplianceAgent(ComplianceAgent):
                 'risk_level': RiskLevel.HIGH.value,
                 'action': 'Address overdue timeline violations immediately'
             })
-
-            if self.llm_available:
-                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Timeline Compliance")
+            result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Timeline Compliance")
 
         return result
 
@@ -751,9 +738,7 @@ class AmountVerificationAgent(ComplianceAgent):
                 'risk_level': RiskLevel.MEDIUM.value,
                 'action': 'Verify and reconcile financial amounts'
             })
-
-            if self.llm_available:
-                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Amount Verification")
+            result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Amount Verification")
 
         return result
 
@@ -816,9 +801,7 @@ class ClaimsDetectionAgent(ComplianceAgent):
                 'risk_level': RiskLevel.MEDIUM.value,
                 'action': 'Expedite claim processing and resolution'
             })
-
-            if self.llm_available:
-                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 4")
+            result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 4")
 
         return result
 
@@ -883,9 +866,7 @@ class FlagInstructionsAgent(ComplianceAgent):
                 'risk_level': RiskLevel.MEDIUM.value,
                 'action': 'Address flagged conditions and update flag status'
             })
-
-            if self.llm_available:
-                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Flag Management")
+            result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Flag Management")
 
         return result
 
@@ -953,8 +934,10 @@ class ComplianceRiskAssessmentAgent(ComplianceAgent):
 
         # Multiple violation risk
         if dormancy_results and isinstance(dormancy_results, dict):
-            violation_count = len([r for r in dormancy_results.values()
-                                   if isinstance(r, dict) and r.get('violations')])
+            violation_count = 0
+            for res in dormancy_results.values():
+                if isinstance(res, dict) and res.get('violations'):
+                    violation_count += 1
             if violation_count > 3:
                 risk_factors.append("Multiple compliance violations")
                 risk_score += violation_count
@@ -978,11 +961,10 @@ class ComplianceRiskAssessmentAgent(ComplianceAgent):
                 'action': 'Implement enhanced monitoring and risk mitigation measures'
             })
 
-            if self.llm_available:
-                result['recommendation'] = self.get_llm_recommendation(
-                    f"Risk score: {risk_score}, Factors: {', '.join(risk_factors)}",
-                    "Compliance Risk Management"
-                )
+            result['recommendation'] = self.get_llm_recommendation(
+                f"Risk score: {risk_score}, Factors: {', '.join(risk_factors)}",
+                "Compliance Risk Management"
+            )
 
         result['risk_score'] = risk_score
         result['risk_factors'] = risk_factors
@@ -1056,9 +1038,7 @@ class RegulatoryReportingAgent(ComplianceAgent):
                 'risk_level': RiskLevel.MEDIUM.value,
                 'action': 'Submit required regulatory reports to CBUAE'
             })
-
-            if self.llm_available:
-                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 3.10")
+            result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "CBUAE Article 3.10")
 
         return result
 
@@ -1132,9 +1112,7 @@ class AuditTrailAgent(ComplianceAgent):
                 'risk_level': RiskLevel.MEDIUM.value,
                 'action': 'Complete audit trail documentation and address gaps'
             })
-
-            if self.llm_available:
-                result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Audit Trail Management")
+            result['recommendation'] = self.get_llm_recommendation("\n".join(violations), "Audit Trail Management")
 
         return result
 
@@ -1199,13 +1177,11 @@ class ActionGenerationAgent(ComplianceAgent):
                     'risk_level': RiskLevel.HIGH.value,
                     'action': f"Execute {high_priority_count} high-priority actions immediately"
                 })
-
-                if self.llm_available:
-                    action_summary = "; ".join([a['action'] for a in priority_actions[:3]])
-                    result['recommendation'] = self.get_llm_recommendation(
-                        f"High-priority actions: {action_summary}",
-                        "Action Planning"
-                    )
+                action_summary = "; ".join([a['action'] for a in priority_actions[:3]])
+                result['recommendation'] = self.get_llm_recommendation(
+                    f"High-priority actions: {action_summary}",
+                    "Action Planning"
+                )
 
         return result
 
@@ -1261,6 +1237,9 @@ class FinalVerificationAgent(ComplianceAgent):
         violations = []
         verification_summary = {}
 
+        RISK_LEVEL_MAP = {level.value: i for i, level in enumerate(RiskLevel)}
+        PRIORITY_MAP = {level.value: i for i, level in enumerate(Priority)}
+
         if dormancy_results and isinstance(dormancy_results, dict):
             # Analyze overall compliance status
             statuses = []
@@ -1275,7 +1254,8 @@ class FinalVerificationAgent(ComplianceAgent):
                         statuses.append(status)
 
                     agent_violations = agent_result.get('violations', [])
-                    all_violations.extend(agent_violations)
+                    if agent_violations:
+                        all_violations.extend(agent_violations)
 
                     risk_level = agent_result.get('risk_level')
                     if risk_level:
@@ -1288,12 +1268,14 @@ class FinalVerificationAgent(ComplianceAgent):
             # Generate verification summary
             verification_summary = {
                 'total_agents_executed': len([r for r in dormancy_results.values() if isinstance(r, dict)]),
-                'compliant_agents': len([s for s in statuses if s == ComplianceStatus.COMPLIANT.value]),
-                'non_compliant_agents': len([s for s in statuses if s == ComplianceStatus.NON_COMPLIANT.value]),
-                'critical_violations': len([s for s in statuses if s == ComplianceStatus.CRITICAL_VIOLATION.value]),
+                'compliant_agents': statuses.count(ComplianceStatus.COMPLIANT.value),
+                'non_compliant_agents': statuses.count(ComplianceStatus.NON_COMPLIANT.value),
+                'critical_violations': statuses.count(ComplianceStatus.CRITICAL_VIOLATION.value),
                 'total_violations': len(all_violations),
-                'highest_risk_level': max(risk_levels) if risk_levels else RiskLevel.LOW.value,
-                'highest_priority': max(priorities) if priorities else Priority.LOW.value
+                'highest_risk_level': max(risk_levels, key=lambda r: RISK_LEVEL_MAP.get(r,
+                                                                                        -1)) if risk_levels else RiskLevel.LOW.value,
+                'highest_priority': max(priorities,
+                                        key=lambda p: PRIORITY_MAP.get(p, -1)) if priorities else Priority.LOW.value
             }
 
             # Check for conflicting results
@@ -1347,13 +1329,11 @@ class FinalVerificationAgent(ComplianceAgent):
                     'risk_level': overall_risk,
                     'action': 'Address compliance issues identified in verification summary'
                 })
-
-                if self.llm_available:
-                    summary_text = json.dumps(verification_summary, indent=2)
-                    result['recommendation'] = self.get_llm_recommendation(
-                        f"Verification Summary: {summary_text}",
-                        "Final Verification"
-                    )
+                summary_text = json.dumps(verification_summary, indent=2)
+                result['recommendation'] = self.get_llm_recommendation(
+                    f"Verification Summary: {summary_text}",
+                    "Final Verification"
+                )
 
         result['verification_summary'] = verification_summary
         return result
@@ -1388,5 +1368,3 @@ class ComplianceOrchestrator:
         'action_generation_agent': ActionGenerationAgent,
         'final_verification_agent': FinalVerificationAgent,
     }
-
-# --- END OF COMPLETE 17 COMPLIANCE VERIFICATION AGENTS ---

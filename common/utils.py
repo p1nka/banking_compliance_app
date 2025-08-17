@@ -1,3 +1,5 @@
+# --- START OF FILE utils.py ---
+
 # common/utils.py
 """
 Utility functions shared across different modules to prevent circular imports.
@@ -22,32 +24,40 @@ def clean_sql_query(raw_sql):
 
     # First, remove any markdown code blocks
     clean_sql = re.sub(r"```sql\s*|\s*```", "", raw_sql, flags=re.IGNORECASE)
-
-    # Handle any other code fence markers that might be present
     clean_sql = re.sub(r"```.*?\s*|\s*```", "", clean_sql, flags=re.IGNORECASE)
 
-    # More permissive SQL extraction that better handles window functions and CTEs
-    # Look for SQL query after common prefixes and before common suffixes
+    # Patterns to find the SQL query. Note the capture groups ().
+    # The first pattern is broad and does not need a capture group.
+    # The subsequent patterns capture the text *after* the marker.
     sql_query_indicators = [
-        r"(?:SELECT|WITH)\s+.*?(?:;|$)",  # Capture queries starting with SELECT or WITH (for CTEs)
-        r"SQL QUERY:\s*([\s\S]+?)(?:;|$|```)",  # Capture after "SQL QUERY:" marker
-        r"SQL:\s*([\s\S]+?)(?:;|$|```)",  # Capture after "SQL:" marker
+        r"\b(SELECT|WITH)\b[\s\S]+?(?:;|$)",  # A query starting with SELECT or WITH
+        r"SQL QUERY:\s*([\s\S]+?)(?:;|$|```)",  # Capture after "SQL QUERY:"
+        r"SQL:\s*([\s\S]+?)(?:;|$|```)",  # Capture after "SQL:"
     ]
 
+    extracted_query = clean_sql  # Default to the cleaned text if no specific pattern matches
     for pattern in sql_query_indicators:
         matches = re.search(pattern, clean_sql, re.IGNORECASE | re.DOTALL)
         if matches:
-            clean_sql = matches.group(0).strip()
-            break
+            # FIX: Check if capture groups were used in the pattern.
+            # If group 1 exists, it means we captured the content *after* a marker.
+            # Otherwise, the whole match (group 0) is the query.
+            if matches.lastindex and matches.lastindex >= 1:
+                extracted_query = matches.group(1).strip()
+            else:
+                extracted_query = matches.group(0).strip()
+            break  # Stop after the first successful pattern match
 
-    # Remove trailing semicolons as they can cause issues with some SQL Server drivers
-    clean_sql = clean_sql.rstrip(';')
+    # Remove trailing semicolons as they can cause issues with some drivers
+    final_sql = extracted_query.rstrip(';')
 
-    # Handle potential quote issues for SQL Server
-    # This is a potential fix for the 'VIP' issue where nested quotes cause problems
-    clean_sql = clean_sql.replace("''", "'")  # Replace double single quotes with single quotes
+    # FIX: Removed the incorrect replacement of escaped single quotes.
+    # In SQL, '' is the correct way to escape a single quote inside a string.
+    # Replacing it with ' would cause syntax errors.
+    # For example, `WHERE name = 'O''Malley'` would become `WHERE name = 'O'Malley'`, which is invalid.
+    # clean_sql = clean_sql.replace("''", "'") # This line was incorrect and has been removed.
 
-    return clean_sql.strip()
+    return final_sql.strip()
 
 
 def get_fallback_response(response_type):

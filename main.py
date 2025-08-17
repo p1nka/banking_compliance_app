@@ -8,9 +8,14 @@ import hashlib
 import hmac
 import pyodbc
 
+from langchain_groq import ChatGroq
 
+from dotenv import load_dotenv
+
+load_dotenv()
 import ui
-
+from ai.llm import load_llm
+import config as AppConfig
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
@@ -74,7 +79,37 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+llm = None
+config = None
 
+try:
+    # 1. Load the LLM instance using your actual function from llm.py
+    llm = load_llm()
+
+    # 2. Build the config object the DormantAgent expects, using your real config.py
+    # This avoids all mocks and placeholders.
+    class LLMConfig:
+        def __init__(self, provider, model_name):
+            self.provider = provider
+            self.model_name = model_name
+
+    class RAGSystemConfig:
+        def __init__(self, llm_config):
+            self.llm_for_generation = llm_config
+
+    class AgentConfig:
+        def __init__(self, rag_system_config):
+            self.rag_system = rag_system_config
+
+    # Use the variables directly from your imported config.py
+    llm_config = LLMConfig(provider=AppConfig.AI_MODEL_PROVIDER, model_name=AppConfig.AI_MODEL_NAME)
+    rag_system_config = RAGSystemConfig(llm_config=llm_config)
+    config = AgentConfig(rag_system_config=rag_system_config)
+
+except Exception as e:
+    # The load_llm() function already handles and displays errors in the UI
+    llm = None
+    config = None
 
 # Authentication functions
 def check_password():
@@ -174,6 +209,60 @@ def check_password():
     return False
 
 
+def create_default_config():
+    """Create a default configuration for agents when config is not available."""
+    return {
+        'dormant_account_config': {
+            'safe_deposit_box': {
+                'dormancy_period_years': 3,
+                'priority_threshold_balance': 10000
+            },
+            'investment_account': {
+                'dormancy_period_years': 3,
+                'maturity_check_enabled': True
+            },
+            'fixed_deposit': {
+                'post_maturity_period_years': 3,
+                'auto_renewal_check': True
+            },
+            'demand_deposit': {
+                'dormancy_period_years': 3,
+                'minimum_balance_threshold': 100
+            },
+            'payment_instruments': {
+                'unclaimed_period_years': 1,
+                'instrument_types': ['bankers_cheque', 'bank_draft', 'cashier_order']
+            },
+            'cb_transfer': {
+                'eligibility_period_years': 5,
+                'minimum_transfer_amount': 1000
+            },
+            'article_3_process': {
+                'contact_required': True,
+                'waiting_period_months': 3
+            },
+            'high_value_account': {
+                'threshold_amount': 100000,
+                'special_handling_required': True
+            },
+            'transition_detection': {
+                'reactivation_detection_enabled': True,
+                'activity_monitoring_days': 30
+            }
+        },
+        'compliance_settings': {
+            'cbuae_compliance_enabled': True,
+            'regulatory_reporting_enabled': True,
+            'audit_trail_enabled': True
+        },
+        'general_settings': {
+            'default_currency': 'AED',
+            'date_format': '%Y-%m-%d',
+            'timezone': 'UTC+4'
+        }
+    }
+
+
 # Only import other modules after handling login
 if check_password():
     # Only after setting page config and authentication, import other modules
@@ -182,18 +271,15 @@ if check_password():
         SESSION_DATA_PROCESSED, SESSION_COLUMN_MAPPING
     )
 
-    # Import database initialization functions
-    from database.schema import init_db, get_db_schema
-# Add this after imports but before UI rendering
-# Initialize session state variables
+    # Initialize session state variables
     from config import SESSION_COLUMN_MAPPING, SESSION_APP_DF, SESSION_DATA_PROCESSED
 
     if SESSION_COLUMN_MAPPING not in st.session_state:
         st.session_state[SESSION_COLUMN_MAPPING] = {}
-    
+
     if SESSION_APP_DF not in st.session_state:
         st.session_state[SESSION_APP_DF] = None
-    
+
     if SESSION_DATA_PROCESSED not in st.session_state:
         st.session_state[SESSION_DATA_PROCESSED] = False
     # Now import UI modules
@@ -214,23 +300,6 @@ if check_password():
     st.title(APP_TITLE)
     st.markdown(APP_SUBTITLE)
 
-    # Try to get the LLM model
-    llm = None
-    try:
-        llm = load_llm()
-        if llm is None:
-            st.sidebar.warning("⚠️ AI Assistant not available. Some features will be limited.")
-    except Exception as e:
-        st.sidebar.error(f"Error initializing LLM: {e}")
-        st.sidebar.warning("⚠️ AI Assistant not available. Some features will be limited.")
-
-    # Try to initialize the database
-    try:
-        db_init= init_db()
-    except Exception as e:
-        st.sidebar.error(f"Database initialization error: {str(e)}")
-        st.sidebar.info("Continuing with limited database functionality.")
-
     if "report_date_for_dormancy" not in st.session_state:
         st.session_state.report_date_for_dormancy = datetime.now().date()
         # The UI functions expect a string
@@ -241,8 +310,8 @@ if check_password():
 
     # dormant_flags_history_df for dormant_ui
     dormant_flags_history_df = pd.DataFrame()  # Default to empty
-    flagging_inactivity_days = st.session_state.get("flagging_inactivity_threshold_days", 3 * 365)  # from sidebar
-    freeze_inactivity_days = st.session_state.get("freeze_inactivity_threshold_days", 3 * 365)  # from sidebar
+    flagging_inactivity_days = st.session_state.get("flagging_inactivity_threshold_days", 1095)  # from sidebar
+    freeze_inactivity_days = st.session_state.get("freeze_inactivity_threshold_days", 1095)  # from sidebar
 
     report_dt = datetime.strptime(report_date_str, "%Y-%m-%d")  # report_date_str from sidebar date input
 
@@ -279,9 +348,10 @@ if check_password():
 
         # Display different UI based on selected mode
         if app_mode == "🏦 Dormant Account Analyzer":
-            ui.dormant_ui.render_dormant_analyzer(df, report_date_str, llm, dormant_flags_history_df)   # NEW
+            ui.dormant_ui.render_dormant_analyzer(df, report_date_str, llm, dormant_flags_history_df,
+                                                  config)  # NEW - Added config parameter
         elif app_mode == "🔒 Dormant Compliance Analyzer":
-            ui.compliance_ui.render_compliance_analyzer(df,agent_name_input, llm)
+            ui.compliance_ui.render_compliance_analyzer(df, agent_name_input, llm)
         elif app_mode == "💬 IA Chat":
             render_chatbot(llm)
         elif app_mode == "🔍 SQL Bot":
@@ -292,21 +362,7 @@ if check_password():
             "👈 Please upload data using the sidebar options to get started."
         )
 
-        # If no data is loaded, show an example of the expected format
-        if st.checkbox("Show Expected Data Format"):
-            st.subheader("Example Data Format")
-            # Create a small example DataFrame
-            example_data = {
-                "Account_ID": ["ACC001", "ACC002", "ACC003"],
-                "Customer_ID": ["CUST001", "CUST002", "CUST003"],
-                "Account_Type": ["Savings", "Current", "Fixed Deposit"],
-                "Date_Last_Cust_Initiated_Activity": ["2023-01-15", "2022-05-20", "2021-02-10"],
-                "Expected_Account_Dormant": ["No", "Yes", "Yes"]
-            }
-            example_df = pd.DataFrame(example_data)
-            st.dataframe(example_df)
-
-            st.markdown("""
+        st.markdown("""
             ### Essential Columns
             Your dataset should include the following key columns:
             - `Account_ID`: Unique identifier for the account

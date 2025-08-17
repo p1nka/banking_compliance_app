@@ -1,49 +1,51 @@
+# --- START OF FILE auth.py ---
+
 import os
 import streamlit as st
+# This import will now work correctly with the fixed config.py
 from config import APP_USERNAME, APP_PASSWORD, SESSION_LOGGED_IN
+
 
 def login():
     """Handles user login via sidebar."""
     st.sidebar.title("🔐 Login")
-    username = st.sidebar.text_input("Username")
-    password = st.sidebar.text_input("Password", type="password")
 
-    # Default credentials if not found in secrets or environment variables
-    app_user = APP_USERNAME
-    app_pass = APP_PASSWORD
+    # Use secrets if available, otherwise fall back to config defaults
+    app_user = st.secrets.get("APP_USERNAME", APP_USERNAME)
+    app_pass = st.secrets.get("APP_PASSWORD", APP_PASSWORD)
 
-    # Prefer secrets over environment variables if secrets are available
-    secrets_available = hasattr(st, 'secrets')
-    if secrets_available:
-        try:
-            app_user = st.secrets.get("APP_USERNAME", app_user)
-            app_pass = st.secrets.get("APP_PASSWORD", app_pass)
-        except Exception as e:
-             st.sidebar.warning(f"Could not read APP login secrets: {e}. Using default or env vars.")
+    username = st.sidebar.text_input("Username", key="login_username")
+    password = st.sidebar.text_input("Password", type="password", key="login_password")
 
-    if st.sidebar.button("Login"):
+    if st.sidebar.button("Login", key="login_button"):
         if username == app_user and password == app_pass:
             st.session_state[SESSION_LOGGED_IN] = True
             st.rerun()
         else:
             st.sidebar.error("Invalid username or password")
 
+
 def show_login_info():
     """Display login information in the sidebar."""
-    try:
-        secrets_or_env_set = (os.getenv("APP_USERNAME") or (hasattr(st, 'secrets') and st.secrets.get("APP_USERNAME")))
-        if not secrets_or_env_set:
-             st.sidebar.info("Default login: admin / pass123 (Set APP_USERNAME/APP_PASSWORD in secrets.toml or env vars)")
-        else:
-             st.sidebar.info("Using custom login from secrets/env vars.")
-    except Exception:
-         st.sidebar.info("Default login: admin / pass123 (Set APP_USERNAME/APP_PASSWORD in secrets.toml or env vars)")
+    # Check if custom credentials are set either in secrets or environment variables
+    secrets_or_env_set = (
+            os.getenv("APP_USERNAME") is not None or
+            (hasattr(st, 'secrets') and st.secrets.get("APP_USERNAME") is not None)
+    )
+
+    if not secrets_or_env_set:
+        st.sidebar.info(f"Default login: {APP_USERNAME} / {APP_PASSWORD}")
+        st.sidebar.caption("Set APP_USERNAME/APP_PASSWORD in secrets.toml or env vars to override.")
+    else:
+        st.sidebar.info("Using custom login credentials.")
+
 
 def enforce_login():
-    """Check if user is logged in and handle login process if not."""
+    """
+    Checks if a user is logged in. If not, it displays the login form and
+    stops the rest of the app from running.
+    """
     if not st.session_state.get(SESSION_LOGGED_IN, False):
         login()
         show_login_info()
-        st.stop()  # Stop execution if not logged in
-        return False
-    return True
+        st.stop()

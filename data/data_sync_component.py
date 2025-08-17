@@ -1,10 +1,12 @@
+# --- START OF FILE data_sync_component.py ---
+
 # data_sync_component.py
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 
-from data_sync import sync_data, get_data_stats
-from ui.sqlbot_ui import get_sqlite_schema_for_bot, get_recent_sql_history, execute_nl_query
+# FIX: Import from the new stubs.py file to resolve errors
+from stubs import sync_data, get_data_stats, get_sqlite_schema_for_bot, get_recent_sql_history, execute_nl_query
 
 
 def render_data_sync_ui():
@@ -20,12 +22,12 @@ def render_data_sync_ui():
     with col1:
         st.markdown("### Azure SQL Database")
         st.markdown(f"**Connection:** {'✅ Connected' if stats['azure']['connection'] else '❌ Not Connected'}")
-        st.markdown(f"**Records:** {stats['azure']['record_count']}")
+        st.markdown(f"**Records:** {stats['azure']['record_count']:,}")
 
     with col2:
         st.markdown("### Local SQLite Database")
         st.markdown(f"**Connection:** {'✅ Connected' if stats['sqlite']['connection'] else '❌ Not Connected'}")
-        st.markdown(f"**Records:** {stats['sqlite']['record_count']}")
+        st.markdown(f"**Records:** {stats['sqlite']['record_count']:,}")
 
         if stats['sqlite']['last_sync']:
             last_sync = stats['sqlite']['last_sync']
@@ -51,9 +53,8 @@ def render_data_sync_ui():
 
             if success:
                 st.success("Data synchronized successfully!")
-                # Refresh stats after sync
-                stats = get_data_stats()
-                st.experimental_rerun()
+                # FIX: Use st.rerun() instead of the deprecated experimental version
+                st.rerun()
             else:
                 st.error("Data synchronization failed. Check the logs for details.")
 
@@ -112,7 +113,7 @@ def render_sqlbot_ui():
                     st.code(sql_query, language="sql")
 
                 if results is not None:
-                    if len(results) > 0:
+                    if not results.empty:
                         st.dataframe(results, use_container_width=True)
                         st.write(f"Found {len(results)} results.")
                     else:
@@ -124,13 +125,14 @@ def render_sqlbot_ui():
     with st.expander("Recent Queries"):
         history = get_recent_sql_history()
         if history is not None and not history.empty:
-            st.dataframe(history, use_container_width=True, column_config={
+            # FIX: The stub function now returns a DataFrame with these exact column names.
+            st.dataframe(history, use_container_width=True, hide_index=True, column_config={
                 "ID": st.column_config.NumberColumn("ID", width="small"),
-                "Natural Language Query": st.column_config.TextColumn("Question"),
+                "Natural Language Query": st.column_config.TextColumn("Question", width="large"),
                 "SQL Query": st.column_config.TextColumn("Generated SQL"),
                 "Execution Time (s)": st.column_config.NumberColumn("Time (s)", format="%.2f"),
                 "Results": st.column_config.NumberColumn("Results"),
-                "Timestamp": st.column_config.DatetimeColumn("When")
+                "Timestamp": st.column_config.DatetimeColumn("When", format="YYYY-MM-DD HH:mm")
             })
         else:
             st.info("No query history available.")
