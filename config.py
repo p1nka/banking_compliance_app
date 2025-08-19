@@ -8,12 +8,9 @@ Configuration settings for the application.
 import os
 
 # Try to load dotenv if available, but continue if not installed
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    print("Warning: python-dotenv package not installed. .env file support is disabled.")
-    print("To enable, run: pip install python-dotenv")
+
+
+
 
 # --- Application Configuration ---
 APP_NAME = "Banking Compliance Assistant"
@@ -43,7 +40,7 @@ DB_DRIVER = os.getenv("DB_DRIVER", "{ODBC Driver 18 for SQL Server}")
 
 # --- AI Model Configuration ---
 AI_MODEL_PROVIDER = os.getenv("AI_MODEL_PROVIDER", "groq")
-AI_MODEL_NAME = os.getenv("AI_MODEL_NAME", "llama3-70b-4096")
+AI_MODEL_NAME = os.getenv("AI_MODEL_NAME", "llama3-70b-8192")
 AI_API_KEY = os.getenv("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") # No default for API key is a safer practice
 
 

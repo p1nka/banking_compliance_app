@@ -645,34 +645,98 @@ def render_individual_agent_analysis(df, selected_agent, agent_name_input, llm):
 
 def process_complete_assessment(account_records, batch_size, include_ai,
                                 export_details, save_to_db, llm, agent_name):
-    """Process complete assessment with orchestrator"""
-    with st.spinner("Initializing real compliance orchestrator..."):
-        orchestrator = ComplianceOrchestrator()
-        st.warning("⚠️ Using basic orchestrator without full configuration")
+    """Process complete assessment with orchestrator - FIXED VERSION"""
 
-            # Process accounts
-        results = run_orchestrator_assessment(orchestrator, account_records, batch_size)
+    with st.spinner("Initializing compliance orchestrator..."):
+        orchestrator = ComplianceOrchestrator(llm, None)  # Pass LLM client
+        st.info("✅ Compliance orchestrator initialized successfully")
 
-            # Display results
-        display_complete_results(results, include_ai, export_details, llm)
+    # Process accounts
+    results = run_orchestrator_assessment_fixed(orchestrator, account_records, batch_size)
 
-            # Save if requested
-        if save_to_db:
-                save_assessment_results(results, agent_name)
+    # Display results
+    display_complete_results(results, include_ai, export_details, llm)
+
+    # Save if requested
+    if save_to_db:
+        save_assessment_results(results, agent_name)
+
+
+def run_orchestrator_assessment_fixed(orchestrator, account_records, batch_size):
+    """Run orchestrator assessment - FIXED VERSION"""
+    total_accounts = len(account_records)
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    results = {
+        'total_accounts': total_accounts,
+        'processed_accounts': 0,
+        'compliant_accounts': 0,
+        'violations': [],
+        'execution_time': 0
+    }
+
+    start_time = time.time()
+
+    # Process in batches
+    for i in range(0, total_accounts, batch_size):
+        batch = account_records[i:i + batch_size]
+        status_text.text(f"Processing batch {i // batch_size + 1}...")
+
+        try:
+            # Use the correct method name
+            batch_results = orchestrator.process_multiple_accounts(batch)
+
+            # Update results
+            for account_result in batch_results:
+                if isinstance(account_result, dict):
+                    # Count compliant accounts (if all agents are compliant)
+                    is_compliant = True
+                    account_violations = []
+
+                    for agent_name, agent_result in account_result.items():
+                        if isinstance(agent_result, dict):
+                            status = agent_result.get('compliance_status', 'compliant')
+                            if status in ['non_compliant', 'critical_violation']:
+                                is_compliant = False
+
+                            violations = agent_result.get('violations', [])
+                            account_violations.extend(violations)
+
+                    if is_compliant:
+                        results['compliant_accounts'] += 1
+
+                    results['violations'].extend(account_violations)
+
+                results['processed_accounts'] += 1
+
+        except Exception as e:
+            st.error(f"Error processing batch: {e}")
+            # Log the full error for debugging
+            import traceback
+            st.error(f"Full error: {traceback.format_exc()}")
+
+        progress_bar.progress((i + len(batch)) / total_accounts)
+
+    results['execution_time'] = time.time() - start_time
+    status_text.text("✅ Assessment completed")
+
+    return results
 
 
 
 
-def process_individual_agent(agent_class, account_records, use_real_config,
+def process_individual_agent(agent_class, account_records,
                              enable_logging, export_results, agent_name, llm, user_name):
     """Process individual agent"""
     with st.spinner(f"Running {agent_name}..."):
+        # FIX: Instantiate the agent class with the CORRECT keyword argument `llm_client`
+        agent_instance = agent_class(llm_client=llm)
 
+        # Process accounts using the agent INSTANCE
+        results = run_individual_agent(agent_instance, account_records, enable_logging)
 
-            # Process accounts
-        results = run_individual_agent(agent_name, account_records, enable_logging)
-
-            # Display results
+        # Display results
         display_individual_results(results, agent_name, export_results, llm)
 
 
@@ -991,26 +1055,27 @@ def save_assessment_results(results, agent_name):
 
 
 def df_to_account_records(df):
-    """Convert DataFrame to account records format"""
+    """Convert DataFrame to account records format - FIXED VERSION"""
     account_records = []
 
     for _, row in df.iterrows():
         account = {
-            # Core identification
+            # Core identification - ensure all fields are strings
             'account_id': str(row.get('account_id', f'ACC_{len(account_records) + 1}')),
             'customer_id': str(row.get('customer_id', 'Unknown')),
 
             # Customer information
             'customer_type': str(row.get('customer_type', 'INDIVIDUAL')).upper(),
-            'customer_email': str(row.get('customer_email', '')),
-            'customer_phone': str(row.get('customer_phone', '')),
+            'customer_email': str(row.get('email_primary', row.get('customer_email', ''))),
+            'customer_phone': str(row.get('phone_primary', row.get('customer_phone', ''))),
+            'customer_address': str(row.get('address_line1', '')),
 
             # Account details
             'account_type': str(row.get('account_type', 'SAVINGS')).upper(),
             'currency': str(row.get('currency', 'AED')),
             'account_status': str(row.get('account_status', 'ACTIVE')),
 
-            # Financial information
+            # Financial information - ensure proper number conversion
             'balance_current': float(row.get('balance_current', 0) or 0),
             'balance_available': float(row.get('balance_available', 0) or 0),
 
@@ -1026,8 +1091,8 @@ def df_to_account_records(df):
             'last_contact_method': str(row.get('last_contact_method', '')),
 
             # Transfer information
-            'transfer_eligibility_date': row.get('transfer_eligibility_date', None),
-            'transferred_to_cb_date': row.get('transferred_to_cb_date', None),
+            'transfer_eligibility_date': row.get('transfer_eligibility_date'),
+            'transferred_to_cb_date': row.get('transferred_to_cb_date'),
             'cb_transfer_amount': float(row.get('cb_transfer_amount', 0) or 0),
 
             # KYC and documentation

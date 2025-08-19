@@ -11,8 +11,8 @@ def login():
     st.sidebar.title("🔐 Login")
 
     # Use secrets if available, otherwise fall back to config defaults
-    app_user = st.secrets.get("APP_USERNAME", APP_USERNAME)
-    app_pass = st.secrets.get("APP_PASSWORD", APP_PASSWORD)
+    app_user =os.getenv("APP_USERNAME", APP_USERNAME)
+    app_pass = os.getenv("APP_PASSWORD", APP_PASSWORD)
 
     username = st.sidebar.text_input("Username", key="login_username")
     password = st.sidebar.text_input("Password", type="password", key="login_password")

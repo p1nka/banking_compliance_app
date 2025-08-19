@@ -101,40 +101,110 @@ def initialize_dormant_agents(llm_client, config):
     return agents
 
 
-def prepare_account_data(df_row, account_type=None):
-    """Prepare account data - WORKING VERSION that keeps 100% dormancy."""
+# COMPLETE FIX for ui/dormant_ui.py based on your actual CSV data
+# Replace the existing functions with these corrected versions
 
-    # CRITICAL: Use the ORIGINAL column names from your CSV, not standardized ones
+def prepare_account_data(df_row, account_type=None):
+    """Prepare account data - FIXED for your actual CSV structure."""
+
+    # Your CSV uses exact column names, so we can access them directly
     account_data = {
-        'account_id': df_row.get('account_id', 'Unknown'),
-        'account_type': df_row.get('account_type', 'unknown'),  # Keep original account type
-        'account_subtype': df_row.get('account_subtype', ''),  # Add subtype for filtering
+        # Core identifiers - direct mapping to your CSV columns
+        'account_id': str(df_row.get('account_id', 'Unknown')),
+        'account_type': str(df_row.get('account_type', 'unknown')).upper(),
+        'account_subtype': str(df_row.get('account_subtype', '')).upper(),
+
+        # Financial data
         'balance': float(df_row.get('balance_current', 0) or 0),
+        'balance_current': float(df_row.get('balance_current', 0) or 0),
+
+        # Key date fields for dormancy analysis
         'last_activity_date': df_row.get('last_transaction_date'),
+        'last_transaction_date': df_row.get('last_transaction_date'),
         'maturity_date': df_row.get('maturity_date'),
-        'customer_tier': str(df_row.get('customer_type', 'standard')).lower(),
+        'opening_date': df_row.get('opening_date'),
+
+        # Dormancy specific fields
+        'dormancy_status': str(df_row.get('dormancy_status', 'active')).upper(),
+        'dormancy_trigger_date': df_row.get('dormancy_trigger_date'),
+        'transfer_eligibility_date': df_row.get('transfer_eligibility_date'),
+        'current_stage': str(df_row.get('current_stage', '')).upper(),
+
+        # Contact and process fields
         'contact_attempts_made': int(df_row.get('contact_attempts_made', 0) or 0),
+        'last_contact_date': df_row.get('last_contact_date'),
+        'last_contact_attempt_date': df_row.get('last_contact_attempt_date'),
+
+        # Customer information
+        'customer_type': str(df_row.get('customer_type', 'INDIVIDUAL')).upper(),
+        'customer_tier': str(df_row.get('customer_type', 'standard')).lower(),
+
+        # Additional fields that agents might need
+        'currency': str(df_row.get('currency', 'AED')),
+        'account_status': str(df_row.get('account_status', 'ACTIVE')).upper(),
+        'auto_renewal': str(df_row.get('auto_renewal', '')).upper(),
+
+        # For transition detection
         'previous_dormancy_status': str(df_row.get('dormancy_status', 'active')).lower(),
         'current_activity_status': str(df_row.get('account_status', 'active')).lower(),
-        'dormancy_status': str(df_row.get('dormancy_status', 'active')).lower()
     }
 
-    # Handle date conversion
-    for date_field in ['last_activity_date', 'maturity_date']:
-        if account_data[date_field] and isinstance(account_data[date_field], str):
-            try:
-                account_data[date_field] = datetime.fromisoformat(account_data[date_field])
-            except ValueError:
-                try:
-                    account_data[date_field] = datetime.strptime(account_data[date_field], "%Y-%m-%d")
-                except (ValueError, TypeError):
-                    account_data[date_field] = None
+    # Convert date fields properly
+    date_fields = ['last_activity_date', 'last_transaction_date', 'maturity_date',
+                   'opening_date', 'dormancy_trigger_date', 'last_contact_date',
+                   'last_contact_attempt_date', 'transfer_eligibility_date']
+
+    for date_field in date_fields:
+        if account_data[date_field]:
+            account_data[date_field] = convert_date_safely(account_data[date_field])
 
     return account_data
 
 
+def convert_date_safely(date_value):
+    """Convert date field with support for your CSV date format."""
+    if pd.isna(date_value) or date_value is None or str(date_value).strip() == '':
+        return None
+
+    if isinstance(date_value, datetime):
+        return date_value
+
+    if isinstance(date_value, str):
+        date_value = date_value.strip()
+        if not date_value:
+            return None
+
+        # Your CSV uses YYYY-MM-DD format, try this first
+        try:
+            return datetime.strptime(date_value, "%Y-%m-%d")
+        except ValueError:
+            pass
+
+        # Try other common formats
+        date_formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%d/%m/%Y",
+            "%m/%d/%Y",
+            "%Y/%m/%d",
+        ]
+
+        for fmt in date_formats:
+            try:
+                return datetime.strptime(date_value, fmt)
+            except ValueError:
+                continue
+
+        # Try pandas parser as last resort
+        try:
+            return pd.to_datetime(date_value)
+        except:
+            return None
+
+    return None
+
+
 def run_single_agent_analysis(agent, df, report_date: datetime, account_type_filter=None):
-    """Run agent analysis - WORKING VERSION with subtype filtering."""
+    """Run agent analysis - FINAL FIX with corrected filtering logic."""
     results = []
     processed_count = 0
 
@@ -143,43 +213,67 @@ def run_single_agent_analysis(agent, df, report_date: datetime, account_type_fil
 
     agent_name = agent.__class__.__name__
 
+    st.write(f"🔍 Running {agent_name} on {len(df)} accounts")
+
+    # Debug: Show what's in the data
+    if not df.empty:
+        unique_types = df['account_type'].unique() if 'account_type' in df.columns else ['N/A']
+        unique_subtypes = df['account_subtype'].unique() if 'account_subtype' in df.columns else ['N/A']
+        st.write(f"📊 Account types: {', '.join(unique_types)}")
+        st.write(f"📊 Account subtypes: {', '.join(unique_subtypes)}")
+
     for idx, row in df.iterrows():
         try:
             account_data = prepare_account_data(row)
 
-            # SMART FILTERING: Apply subtype rules but don't break existing logic
-            should_process = True
+            # UPDATED FILTERING LOGIC - More inclusive based on your actual data
+            should_process = True  # Default to process all
 
             if agent_name == "SafeDepositBoxAgent":
-                # Process accounts with SDB_LINKED subtype
-                account_subtype = str(account_data.get('account_subtype', '')).upper()
-                should_process = (account_subtype == 'SDB_LINKED')
+                # Look for SDB_LINKED subtype (you have this in your data)
+                subtype = account_data.get('account_subtype', '').upper()
+                should_process = (subtype == 'SDB_LINKED')
 
             elif agent_name == "PaymentInstrumentsAgent":
-                # Process accounts with INSTRUMENT_LINKED subtype
-                account_subtype = str(account_data.get('account_subtype', '')).upper()
-                should_process = (account_subtype == 'INSTRUMENT_LINKED')
+                # Look for INSTRUMENT_LINKED subtype (you have this in your data)
+                subtype = account_data.get('account_subtype', '').upper()
+                should_process = (subtype == 'INSTRUMENT_LINKED')
 
             elif agent_name == "InvestmentAccountAgent":
-                # Process INVESTMENT account type only
-                account_type = str(account_data.get('account_type', '')).upper()
-                should_process = (account_type == 'INVESTMENT')
+                # Process INVESTMENT account types (you have this in your data)
+                acct_type = account_data.get('account_type', '').upper()
+                should_process = (acct_type == 'INVESTMENT')
 
             elif agent_name == "FixedDepositAgent":
-                # Process FIXED_DEPOSIT account type only
-                account_type = str(account_data.get('account_type', '')).upper()
-                should_process = (account_type == 'FIXED_DEPOSIT')
+                # Process FIXED_DEPOSIT account types (you have this in your data)
+                acct_type = account_data.get('account_type', '').upper()
+                should_process = (acct_type == 'FIXED_DEPOSIT')
 
             elif agent_name == "DemandDepositAgent":
-                # Process CURRENT and SAVINGS account types (excluding special subtypes)
-                account_type = str(account_data.get('account_type', '')).upper()
-                account_subtype = str(account_data.get('account_subtype', '')).upper()
+                # Process CURRENT and SAVINGS (most of your accounts)
+                # Exclude special subtypes to avoid double counting
+                acct_type = account_data.get('account_type', '').upper()
+                subtype = account_data.get('account_subtype', '').upper()
+                should_process = (acct_type in ['CURRENT', 'SAVINGS'] and
+                                  subtype not in ['SDB_LINKED', 'INSTRUMENT_LINKED'])
 
-                # Include CURRENT/SAVINGS but exclude special subtypes to avoid double counting
-                should_process = (account_type in ['CURRENT', 'SAVINGS'] and
-                                  account_subtype not in ['SDB_LINKED', 'INSTRUMENT_LINKED'])
+            elif agent_name == "CBTransferAgent":
+                # Process ALL dormant accounts for transfer eligibility
+                should_process = True
 
-            # All other agents (CBTransfer, HighValue, Article3, Transition) process ALL accounts
+            elif agent_name == "Article3ProcessAgent":
+                # Process ALL dormant accounts for contact requirements
+                should_process = True
+
+            elif agent_name == "HighValueAccountAgent":
+                # Process ALL accounts to check for high value + dormant
+                should_process = True
+
+            elif agent_name == "TransitionDetectionAgent":
+                # Process ALL accounts to detect transitions
+                should_process = True
+
+
 
             if not should_process:
                 processed_count += 1
@@ -188,23 +282,30 @@ def run_single_agent_analysis(agent, df, report_date: datetime, account_type_fil
             # Execute the agent logic
             result = agent.execute(account_data, report_date)
 
-            # CRITICAL: Show meaningful results (keep the working logic)
+
+
+            # Check for meaningful results
             if result and 'error' not in result:
                 is_meaningful = False
 
-                # Check for meaningful results
-                if 'status' in result and result['status'] in [
-                    ActivityStatus.DORMANT.value,
-                    ActivityStatus.UNCLAIMED.value,
-                    ActivityStatus.PENDING_REVIEW.value,
-                    'Process Pending',
-                    'High Value Dormant',
-                    'Reactivated'
-                ]:
+                # Check for meaningful results based on agent type
+                if 'status' in result:
+                    if result['status'] in [
+                        ActivityStatus.DORMANT.value,
+                        ActivityStatus.UNCLAIMED.value,
+                        ActivityStatus.PENDING_REVIEW.value,
+                        'Process Pending',
+                        'High Value Dormant',
+                        'Reactivated'
+                    ]:
+                        is_meaningful = True
+
+                # For CB Transfer Agent
+                if 'eligible' in result and result['eligible']:
                     is_meaningful = True
-                elif 'eligible' in result and result['eligible']:
-                    is_meaningful = True
-                elif agent_name == 'Article3ProcessAgent' and result.get('status') == 'Process Pending':
+
+                # For Article 3 Process Agent
+                if agent_name == 'Article3ProcessAgent' and result.get('status') == 'Process Pending':
                     is_meaningful = True
 
                 if is_meaningful:
@@ -214,7 +315,23 @@ def run_single_agent_analysis(agent, df, report_date: datetime, account_type_fil
             processed_count += 1
 
         except Exception as e:
-            logger.error(f"Error processing account {row.get('account_id', 'Unknown')} with agent {agent_name}: {e}")
+            st.error(f"Error processing account {row.get('account_id', 'Unknown')} with agent {agent_name}: {e}")
+            import traceback
+            st.write(f"Full error: {traceback.format_exc()}")
+
+    st.write(f"✅ {agent_name}: Processed {processed_count} accounts, found {len(results)} meaningful results")
+
+    # Additional debug for zero results
+    if len(results) == 0 and processed_count > 0:
+        st.warning(f"⚠️ {agent_name} processed {processed_count} accounts but found 0 results. This might indicate:")
+        st.write("1. Accounts don't meet the dormancy criteria for this agent")
+        st.write("2. Date calculations aren't working properly")
+        st.write("3. Agent logic needs adjustment")
+
+        # Show sample account data for debugging
+        if not df.empty:
+            sample_account = prepare_account_data(df.iloc[0])
+            st.write(f"Sample account data: {sample_account}")
 
     return results, processed_count, f"Processed {processed_count} accounts"
 
@@ -717,7 +834,12 @@ def render_summarized_dormant_analysis_view(df, report_date_str, llm, dormant_fl
 
                 # Save to database
                 try:
-                    save_summary_to_db("dormant_analysis", ai_summary, results.get('report_date_used'))
+                    save_summary_to_db(
+                        observation="dormant_analysis",
+                        trend=ai_summary,
+                        insight=comprehensive_summary,
+                        action="Review dormant accounts and implement recommended actions"
+                    )
                     st.success("Analysis saved to database!")
                 except Exception as save_error:
                     st.warning(f"Could not save to database: {save_error}")

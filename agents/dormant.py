@@ -230,7 +230,9 @@ class SafeDepositBoxAgent(DormantAgent):
         result = {'agent': agent_name, 'status': ActivityStatus.ACTIVE.value, 'dormancy_days': dormancy_days,
                   'regulatory_citation': 'CBUAE Art. 2.6'}
 
-        if dormancy_days >= 1095 and account_data.get('account_type') == AccountType.SAFE_DEPOSIT.value:
+        # FIX: Check account_subtype instead of account_type
+        account_subtype = account_data.get('account_subtype', '').upper()
+        if dormancy_days >= 1095 and account_subtype == 'SDB_LINKED':  # FIXED: Check subtype
             result.update({
                 'status': ActivityStatus.DORMANT.value,
                 'action': "Flag for Safe Deposit Box dormancy detection and next steps",
@@ -242,6 +244,7 @@ class SafeDepositBoxAgent(DormantAgent):
         return result
 
 
+
 # 2. Investment Account Agent
 class InvestmentAccountAgent(DormantAgent):
     """Art. 2.3 maturity-based dormancy for Investment Accounts."""
@@ -250,13 +253,22 @@ class InvestmentAccountAgent(DormantAgent):
         agent_name = self.__class__.__name__
         maturity_date = account_data.get('maturity_date')
 
-        if isinstance(maturity_date, str):
+        # FIX: Handle cases where maturity_date might not exist for investment accounts
+        if not maturity_date:
+            # For investment accounts without maturity date, use last_activity_date
+            last_activity_date = account_data.get('last_activity_date')
+            if isinstance(last_activity_date, str):
+                maturity_date = datetime.fromisoformat(last_activity_date)
+            elif isinstance(last_activity_date, datetime):
+                maturity_date = last_activity_date
+            else:
+                return {'agent': agent_name, 'error': 'No maturity or activity date available for investment account',
+                        'status': ActivityStatus.PENDING_REVIEW.value, 'regulatory_citation': 'CBUAE Art. 2.3'}
+        elif isinstance(maturity_date, str):
             try:
                 maturity_date = datetime.fromisoformat(maturity_date)
             except ValueError:
                 maturity_date = None
-        elif not isinstance(maturity_date, datetime):
-            maturity_date = None
 
         if not maturity_date:
             return {'agent': agent_name, 'error': 'Missing or invalid maturity date for maturity-based rule',
@@ -266,7 +278,9 @@ class InvestmentAccountAgent(DormantAgent):
         result = {'agent': agent_name, 'status': ActivityStatus.ACTIVE.value, 'dormancy_days': dormancy_days,
                   'regulatory_citation': 'CBUAE Art. 2.3'}
 
-        if dormancy_days >= 1095 and account_data.get('account_type') == AccountType.INVESTMENT.value:
+        # FIX: Check account_type for INVESTMENT
+        account_type = account_data.get('account_type', '').upper()
+        if dormancy_days >= 1095 and account_type == 'INVESTMENT':
             result.update({
                 'status': ActivityStatus.DORMANT.value,
                 'action': "Flag for Investment account dormancy detection (post-maturity)",
@@ -285,17 +299,28 @@ class FixedDepositAgent(DormantAgent):
     def execute(self, account_data: Dict, report_date: datetime) -> Dict:
         agent_name = self.__class__.__name__
         maturity_date = account_data.get('maturity_date')
-        if isinstance(maturity_date, str):
+
+        # FIX: Handle cases where maturity_date might not exist
+        if not maturity_date:
+            # For fixed deposits without maturity date, use last_activity_date
+            last_activity_date = account_data.get('last_activity_date')
+            if isinstance(last_activity_date, str):
+                maturity_date = datetime.fromisoformat(last_activity_date)
+            elif isinstance(last_activity_date, datetime):
+                maturity_date = last_activity_date
+            else:
+                return {'agent': agent_name, 'error': 'No maturity or activity date available',
+                        'status': ActivityStatus.PENDING_REVIEW.value, 'regulatory_citation': 'CBUAE Art. 2.2'}
+        elif isinstance(maturity_date, str):
             maturity_date = datetime.fromisoformat(maturity_date)
-        elif not isinstance(maturity_date, datetime):
-            return {'agent': agent_name, 'error': 'Missing or invalid maturity date',
-                    'status': ActivityStatus.PENDING_REVIEW.value, 'regulatory_citation': 'CBUAE Art. 2.2'}
 
         dormancy_days = (report_date - maturity_date).days
         result = {'agent': agent_name, 'status': ActivityStatus.ACTIVE.value, 'dormancy_days': dormancy_days,
                   'regulatory_citation': 'CBUAE Art. 2.2'}
 
-        if dormancy_days >= 1095 and account_data.get('account_type') == AccountType.FIXED_DEPOSIT.value:
+        # FIX: Check account_type for FIXED_DEPOSIT
+        account_type = account_data.get('account_type', '').upper()
+        if dormancy_days >= 1095 and account_type == 'FIXED_DEPOSIT':
             result.update({
                 'status': ActivityStatus.DORMANT.value,
                 'action': "Flag for Fixed/Term deposit dormancy detection",
@@ -324,9 +349,10 @@ class DemandDepositAgent(DormantAgent):
         result = {'agent': agent_name, 'status': ActivityStatus.ACTIVE.value, 'dormancy_days': dormancy_days,
                   'regulatory_citation': 'CBUAE Art. 2.1.1'}
 
-        if dormancy_days >= 1095 and account_data.get('account_type') == AccountType.DEMAND_DEPOSIT.value:
+        # FIX: Check if account meets dormancy criteria (3+ years = 1095+ days)
+        if dormancy_days >= 1095 and account_data.get('account_type') in ['CURRENT', 'SAVINGS']:
             result.update({
-                'status': ActivityStatus.DORMANT.value,
+                'status': ActivityStatus.DORMANT.value,  # FIXED: Was returning 'active'
                 'action': "Flag as dormant and initiate contact for Demand Deposit",
                 'priority': Priority.MEDIUM.value,
                 'risk_level': RiskLevel.MEDIUM.value
@@ -353,7 +379,9 @@ class PaymentInstrumentsAgent(DormantAgent):
         result = {'agent': agent_name, 'status': ActivityStatus.ACTIVE.value, 'dormancy_days': dormancy_days,
                   'regulatory_citation': 'CBUAE Art. 2.4'}
 
-        if dormancy_days >= 365 and account_data.get('account_type') == AccountType.UNCLAIMED_INSTRUMENT.value:
+        # FIX: Check account_subtype and use 1-year threshold for payment instruments
+        account_subtype = account_data.get('account_subtype', '').upper()
+        if dormancy_days >= 365 and account_subtype == 'INSTRUMENT_LINKED':  # FIXED: 1 year threshold and check subtype
             result.update({
                 'status': ActivityStatus.UNCLAIMED.value,
                 'action': "Flag for Unclaimed instruments detection and process for ledger transfer",
@@ -363,6 +391,7 @@ class PaymentInstrumentsAgent(DormantAgent):
             context = f"Unclaimed payment instrument dormant for {dormancy_days} days. Requires ledger transfer as per CBUAE Art. 2.4."
 
         return result
+
 
 
 # 6. CB Transfer Agent
@@ -400,16 +429,24 @@ class Article3ProcessAgent(DormantAgent):
 
     def execute(self, account_data: Dict, report_date: datetime) -> Dict:
         agent_name = self.__class__.__name__
-        dormancy_status = account_data.get('dormancy_status')
+        dormancy_status = account_data.get('dormancy_status', '').upper()
         contact_attempts = account_data.get('contact_attempts_made', 0)
         result = {'agent': agent_name, 'status': 'N/A', 'action': None, 'regulatory_citation': 'CBUAE Art. 3'}
 
-        # Only process if the account is already 'dormant' based on other agents/data
-        if dormancy_status == 'dormant':
+        # FIX: Check if account is dormant (not just rely on dormancy_status field)
+        last_activity_date = account_data.get('last_activity_date')
+        if isinstance(last_activity_date, datetime):
+            dormancy_days = (report_date - last_activity_date).days
+            is_dormant = dormancy_days >= 1095 or dormancy_status == 'DORMANT'
+        else:
+            is_dormant = dormancy_status == 'DORMANT'
+
+        # Only process if the account is dormant
+        if is_dormant:
             # Check if contact attempts are less than 3 (assuming 3 attempts are required per CBUAE Art. 3)
             if contact_attempts < 3:
                 result.update({
-                    'status': 'Process Pending',
+                    'status': 'Process Pending',  # FIXED: Now returns meaningful status
                     'action': f"Initiate/Review CBUAE Article 3 Contact Process (Attempts made: {contact_attempts})",
                     'priority': Priority.MEDIUM.value,
                     'risk_level': RiskLevel.MEDIUM.value
@@ -421,7 +458,7 @@ class Article3ProcessAgent(DormantAgent):
                 result.update({
                     'status': 'Contact Attempts Exhausted',
                     'action': f"Review for CBUAE Article 3 completion/escalation (Attempts made: {contact_attempts})",
-                    'priority': Priority.LOW.value,  # Priority might drop as next steps are different
+                    'priority': Priority.LOW.value,
                     'risk_level': RiskLevel.LOW.value
                 })
         return result
@@ -434,13 +471,22 @@ class HighValueAccountAgent(DormantAgent):
     def execute(self, account_data: Dict, report_date: datetime) -> Dict:
         agent_name = self.__class__.__name__
         balance = account_data.get('balance', 0)
-        dormancy_status = account_data.get('dormancy_status')
+        dormancy_status = account_data.get('dormancy_status', '').upper()
         high_value_threshold = 100000  # 100,000 AED
         result = {'agent': agent_name, 'status': 'Standard Value', 'action': None, 'regulatory_citation': 'Internal'}
 
-        if dormancy_status == 'dormant' and balance >= high_value_threshold:
+        # FIX: Check if account is both high-value AND dormant
+        last_activity_date = account_data.get('last_activity_date')
+        if isinstance(last_activity_date, datetime):
+            dormancy_days = (report_date - last_activity_date).days
+            is_dormant = dormancy_days >= 1095 or dormancy_status == 'DORMANT'
+        else:
+            is_dormant = dormancy_status == 'DORMANT'
+
+        # FIXED: Check both balance AND dormancy status
+        if is_dormant and balance >= high_value_threshold:
             result.update({
-                'status': 'High Value Dormant',
+                'status': 'High Value Dormant',  # FIXED: Now detects high-value dormant accounts
                 'action': "Escalate high-value dormant account for manual review",
                 'priority': Priority.CRITICAL.value,
                 'risk_level': RiskLevel.HIGH.value
@@ -456,22 +502,43 @@ class TransitionDetectionAgent(DormantAgent):
 
     def execute(self, account_data: Dict, report_date: datetime) -> Dict:
         agent_name = self.__class__.__name__
-        previous_status = account_data.get('previous_dormancy_status')
-        current_status = account_data.get('current_activity_status')
+
+        # FIX: Use more realistic logic for transition detection
+        # Check if account is currently flagged as dormant but has recent activity
+        dormancy_status = account_data.get('dormancy_status', '').upper()
+        account_status = account_data.get('account_status', '').upper()
+
         result = {'agent': agent_name, 'status': 'No Transition', 'action': None, 'regulatory_citation': 'Internal'}
 
-        # This agent checks for reactivation from 'dormant' to 'active'
-        if previous_status == 'dormant' and current_status == 'active':
-            result.update({
-                'status': 'Reactivated',
-                'action': "Verify reactivation process and update internal records",
-                'priority': Priority.LOW.value,
-                'risk_level': RiskLevel.LOW.value
-            })
-            context = f"Account transitioned from dormant to active. Verify compliance with reactivation procedures."
+        # FIX: More realistic transition detection
+        # If account is marked DORMANT but account_status is ACTIVE, it might be a transition
+        if dormancy_status == 'DORMANT' and account_status == 'ACTIVE':
+            # Check if there's recent activity (within last 30 days)
+            last_activity_date = account_data.get('last_activity_date')
+            if isinstance(last_activity_date, datetime):
+                days_since_activity = (report_date - last_activity_date).days
+                if days_since_activity > 1095:  # Still old activity, this is not a real reactivation
+                    result.update({
+                        'status': 'No Transition',
+                        'action': None
+                    })
+                else:
+                    result.update({
+                        'status': 'Reactivated',
+                        'action': "Verify reactivation process and update internal records",
+                        'priority': Priority.LOW.value,
+                        'risk_level': RiskLevel.LOW.value
+                    })
+            else:
+                # If we can't determine activity date, assume it's a data inconsistency issue
+                result.update({
+                    'status': 'Data Inconsistency',
+                    'action': "Review account status - marked DORMANT but flagged as ACTIVE",
+                    'priority': Priority.MEDIUM.value,
+                    'risk_level': RiskLevel.MEDIUM.value
+                })
 
         return result
-
 
 # =============================================================================
 # Master Orchestrator for Dormancy Analyzers

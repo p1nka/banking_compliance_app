@@ -148,17 +148,10 @@ def get_connection_credentials():
     password = None
     port = 1433
 
-    # Try Streamlit secrets first
-    try:
-        server = st.secrets.get("DB_SERVER")
-        database = st.secrets.get("DB_NAME")
-        username = st.secrets.get("DB_USERNAME")
-        password = st.secrets.get("DB_PASSWORD")
-        port = int(st.secrets.get("DB_PORT", "1433"))
-    except:
-        pass
 
-    # Fallback to environment variables
+
+    # Fallback to environment variable
+
     if not all([server, database, username, password]):
         server = server or os.getenv("DB_SERVER")
         database = database or os.getenv("DB_NAME")

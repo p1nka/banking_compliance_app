@@ -1368,3 +1368,120 @@ class ComplianceOrchestrator:
         'action_generation_agent': ActionGenerationAgent,
         'final_verification_agent': FinalVerificationAgent,
     }
+
+    def __init__(self, llm_client=None, config=None):
+        """Initialize the orchestrator with LLM client and configuration."""
+        self.llm_client = llm_client
+        self.config = config
+        self.agents = {}
+
+        # Initialize all agents
+        for agent_name, agent_class in self.AGENT_CLASS_MAP.items():
+            try:
+                self.agents[agent_name] = agent_class(llm_client, config)
+            except Exception as e:
+                logger.error(f"Failed to initialize {agent_name}: {e}")
+                self.agents[agent_name] = None
+
+    def process_account(self, account_data):
+        """
+        Process a single account through all compliance agents.
+
+        Args:
+            account_data (dict): Account data dictionary
+
+        Returns:
+            dict: Results from all agents for this account
+        """
+        account_results = {}
+
+        for agent_name, agent in self.agents.items():
+            if agent is None:
+                account_results[agent_name] = {
+                    'error': f'Agent {agent_name} not initialized',
+                    'compliance_status': 'pending_review'
+                }
+                continue
+
+            try:
+                # Execute the agent on this account
+                result = agent.execute(account_data)
+                account_results[agent_name] = result
+
+            except Exception as e:
+                logger.error(
+                    f"Error executing {agent_name} on account {account_data.get('account_id', 'Unknown')}: {e}")
+                account_results[agent_name] = {
+                    'error': str(e),
+                    'compliance_status': 'error'
+                }
+
+        return account_results
+
+    def process_multiple_accounts(self, account_list):
+        """
+        Process multiple accounts through all compliance agents.
+
+        Args:
+            account_list (list): List of account data dictionaries
+
+        Returns:
+            list: Results for each account
+        """
+        results = []
+
+        for account_data in account_list:
+            account_result = self.process_account(account_data)
+            results.append(account_result)
+
+        return results
+
+    def run_all_agents(self, account_data, dormancy_results=None):
+        """
+        Run all agents on a single account (compatibility method).
+
+        Args:
+            account_data (dict): Account data
+            dormancy_results (dict): Optional dormancy analysis results
+
+        Returns:
+            dict: Combined results from all agents
+        """
+        return self.process_account(account_data)
+
+    def get_agent_summary(self, results):
+        """
+        Generate summary statistics from agent results.
+
+        Args:
+            results (list): List of account results
+
+        Returns:
+            dict: Summary statistics
+        """
+        total_accounts = len(results)
+        compliant_count = 0
+        violations = []
+
+        for account_results in results:
+            account_compliant = True
+
+            for agent_name, agent_result in account_results.items():
+                if isinstance(agent_result, dict):
+                    status = agent_result.get('compliance_status', 'unknown')
+                    if status in ['non_compliant', 'critical_violation']:
+                        account_compliant = False
+
+                    agent_violations = agent_result.get('violations', [])
+                    violations.extend(agent_violations)
+
+            if account_compliant:
+                compliant_count += 1
+
+        return {
+            'total_accounts': total_accounts,
+            'compliant_accounts': compliant_count,
+            'non_compliant_accounts': total_accounts - compliant_count,
+            'total_violations': len(violations),
+            'compliance_rate': (compliant_count / total_accounts * 100) if total_accounts > 0 else 0
+        }

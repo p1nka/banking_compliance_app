@@ -62,7 +62,7 @@ def load_llm():
         st.sidebar.warning("⚠️ AI Assistant Disabled: Langchain/Groq not installed.")
         return None
 
-    api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
         st.error("❗️ GROQ API Key not found.")

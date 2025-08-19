@@ -1,76 +1,38 @@
 import sys
-
-import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 import os
 import hashlib
 import hmac
-import pyodbc
-
-from langchain_groq import ChatGroq
-
-from dotenv import load_dotenv
-
-load_dotenv()
-import ui
+import ui.dormant_ui
+import ui.compliance_ui
+import ui.chatbot_ui
+import ui.sqlbot_ui
+import ui.sidebar
 from ai.llm import load_llm
 import config as AppConfig
+from ui import sidebar
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
+import streamlit as st
 
-# Try different import approaches to handle the wakeup_connection issue
-try:
-    # First try: Import from database.connection directly
-    from database.connection import (
-        get_db_connection,
-        maintain_connection,
-        perform_keepalive,
-        test_database_connection,
-        show_connection_status
+import_successful = False
+
+import_errors = []
+
+
+from database.connection import (
+    get_db_connection,
+    maintain_connection,
+    perform_keepalive,
+    test_database_connection,
+    show_connection_status
     )
+# Create the modern alias for the wakeup function
+wakeup_connection = perform_keepalive
 
-    # Create wakeup_connection as an alias for perform_keepalive
-    wakeup_connection = perform_keepalive
-
-    st.sidebar.info("✅ Database connection module loaded successfully")
-
-except ImportError as e1:
-    st.sidebar.warning(f"⚠️ Direct import failed: {e1}")
-
-    try:
-        # Second try: Import from database package
-        from database import (
-            get_db_connection,
-            maintain_connection,
-            perform_keepalive,
-            test_database_connection,
-            show_connection_status
-        )
-
-        # Create wakeup_connection as an alias
-        wakeup_connection = perform_keepalive
-
-        st.sidebar.info("✅ Database package loaded successfully")
-
-    except ImportError as e2:
-        st.sidebar.error(f"❌ Package import failed: {e2}")
-
-        try:
-            # Third try: Import using compatibility module
-            from database.compatibility import (
-                get_db_connection,
-                maintain_connection,
-                wakeup_connection,
-                test_database_connection,
-                show_connection_status
-            )
-
-            st.sidebar.info("✅ Database compatibility module loaded")
-
-        except ImportError as e3:
-            st.sidebar.error(f"❌ Compatibility import failed: {e3}")
 
 # ⚠️ IMPORTANT: Set page config FIRST, before any other imports or operations ⚠️
 st.set_page_config(
@@ -209,70 +171,12 @@ def check_password():
     return False
 
 
-def create_default_config():
-    """Create a default configuration for agents when config is not available."""
-    return {
-        'dormant_account_config': {
-            'safe_deposit_box': {
-                'dormancy_period_years': 3,
-                'priority_threshold_balance': 10000
-            },
-            'investment_account': {
-                'dormancy_period_years': 3,
-                'maturity_check_enabled': True
-            },
-            'fixed_deposit': {
-                'post_maturity_period_years': 3,
-                'auto_renewal_check': True
-            },
-            'demand_deposit': {
-                'dormancy_period_years': 3,
-                'minimum_balance_threshold': 100
-            },
-            'payment_instruments': {
-                'unclaimed_period_years': 1,
-                'instrument_types': ['bankers_cheque', 'bank_draft', 'cashier_order']
-            },
-            'cb_transfer': {
-                'eligibility_period_years': 5,
-                'minimum_transfer_amount': 1000
-            },
-            'article_3_process': {
-                'contact_required': True,
-                'waiting_period_months': 3
-            },
-            'high_value_account': {
-                'threshold_amount': 100000,
-                'special_handling_required': True
-            },
-            'transition_detection': {
-                'reactivation_detection_enabled': True,
-                'activity_monitoring_days': 30
-            }
-        },
-        'compliance_settings': {
-            'cbuae_compliance_enabled': True,
-            'regulatory_reporting_enabled': True,
-            'audit_trail_enabled': True
-        },
-        'general_settings': {
-            'default_currency': 'AED',
-            'date_format': '%Y-%m-%d',
-            'timezone': 'UTC+4'
-        }
-    }
-
-
-# Only import other modules after handling login
 if check_password():
     # Only after setting page config and authentication, import other modules
     from config import (
         APP_TITLE, APP_SUBTITLE, SESSION_APP_DF,
         SESSION_DATA_PROCESSED, SESSION_COLUMN_MAPPING
     )
-
-    # Initialize session state variables
-    from config import SESSION_COLUMN_MAPPING, SESSION_APP_DF, SESSION_DATA_PROCESSED
 
     if SESSION_COLUMN_MAPPING not in st.session_state:
         st.session_state[SESSION_COLUMN_MAPPING] = {}
@@ -282,15 +186,6 @@ if check_password():
 
     if SESSION_DATA_PROCESSED not in st.session_state:
         st.session_state[SESSION_DATA_PROCESSED] = False
-    # Now import UI modules
-    from ui.sidebar import render_sidebar
-    from ui.dormant_ui import render_dormant_analyzer
-    from ui.compliance_ui import render_compliance_analyzer
-    from ui.sqlbot_ui import render_sqlbot
-    from ui.chatbot_ui import render_chatbot
-
-    # Import AI model
-    from ai.llm import load_llm
 
     # Display user information
     st.sidebar.markdown(f"**Logged in as:** {st.session_state['username']}")
@@ -319,7 +214,7 @@ if check_password():
     freeze_threshold_dt = report_dt - timedelta(days=freeze_inactivity_days)
     maintain_connection()
     # Render the sidebar with upload options
-    render_sidebar()
+    sidebar.render_sidebar()
 
     # AGENT COMPATIBILITY FIX: Check if we have data in db_loaded_data but not in SESSION_APP_DF
     # This helps ensure compatibility between SQL data loading and the analyzers
@@ -349,13 +244,13 @@ if check_password():
         # Display different UI based on selected mode
         if app_mode == "🏦 Dormant Account Analyzer":
             ui.dormant_ui.render_dormant_analyzer(df, report_date_str, llm, dormant_flags_history_df,
-                                                  config)  # NEW - Added config parameter
+                                                  config)
         elif app_mode == "🔒 Dormant Compliance Analyzer":
             ui.compliance_ui.render_compliance_analyzer(df, agent_name_input, llm)
         elif app_mode == "💬 IA Chat":
-            render_chatbot(llm)
+            ui.chatbot_ui.render_chatbot(llm)
         elif app_mode == "🔍 SQL Bot":
-            render_sqlbot(llm)
+            ui.sqlbot_ui.render_sqlbot(llm)
 
     else:
         st.info(

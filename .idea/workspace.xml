@@ -6,32 +6,12 @@
   <component name="ChangeListManager">
     <list default="true" id="63761940-712c-4363-bb8e-5dc1b9ff83c9" name="Changes" comment="files">
       <change beforePath="$PROJECT_DIR$/.env" beforeDir="false" afterPath="$PROJECT_DIR$/.env" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/Banking_Compliance_app.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Banking_Compliance_app.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.streamlit/secrets.toml" beforeDir="false" afterPath="$PROJECT_DIR$/.streamlit/secrets.toml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/agents/compliance.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/compliance.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/agents/connector.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/connector.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/agents/dormant.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/dormant.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ai/chatbot.py" beforeDir="false" afterPath="$PROJECT_DIR$/ai/chatbot.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ai/llm.py" beforeDir="false" afterPath="$PROJECT_DIR$/ai/llm.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ai/visualizations.py" beforeDir="false" afterPath="$PROJECT_DIR$/ai/visualizations.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/auth.py" beforeDir="false" afterPath="$PROJECT_DIR$/auth.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/common/utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/utils.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/data_sync_component.py" beforeDir="false" afterPath="$PROJECT_DIR$/data/data_sync_component.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/data/parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/data/parser.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/database/azure_connection.py" beforeDir="false" afterPath="$PROJECT_DIR$/data/stubs.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/database/config.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/database/connection.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/connection.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/database/operations.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/operations.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/database/pipelines.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/pipelines.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/database/setup.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/setup.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/database/transfer.py" beforeDir="false" afterPath="$PROJECT_DIR$/database/transfer.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ui/compliance_ui.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/compliance_ui.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/ui/dormant_ui.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/dormant_ui.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ui/sidebar.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/sidebar.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -205,7 +185,15 @@
       <option name="project" value="LOCAL" />
       <updated>1754842892551</updated>
     </task>
-    <option name="localTasksCounter" value="10" />
+    <task id="LOCAL-00010" summary="files">
+      <option name="closed" value="true" />
+      <created>1755454295324</created>
+      <option name="number" value="00010" />
+      <option name="presentableId" value="LOCAL-00010" />
+      <option name="project" value="LOCAL" />
+      <updated>1755454295324</updated>
+    </task>
+    <option name="localTasksCounter" value="11" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
