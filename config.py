@@ -41,7 +41,7 @@ DB_DRIVER = os.getenv("DB_DRIVER", "{ODBC Driver 18 for SQL Server}")
 # --- AI Model Configuration ---
 AI_MODEL_PROVIDER = os.getenv("AI_MODEL_PROVIDER", "groq")
 AI_MODEL_NAME = os.getenv("AI_MODEL_NAME", "llama3-70b-8192")
-AI_API_KEY = os.getenv("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") # No default for API key is a safer practice
+AI_API_KEY = os.getenv("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") # No default for API key is a safer practice
 
 
 # --- Feature Flags & Limits ---
