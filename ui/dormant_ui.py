@@ -1190,7 +1190,9 @@ def render_individual_dormant_agent_view(df, selected_agent_key, report_date_str
 
                 with col3:
                     high_priority_count = sum(
-                        1 for r in results if r.get('priority') in ['HIGH', 'CRITICAL', 'IMMEDIATE'])
+                        1 for r in results
+                        if r.get('priority', '').upper() in ['HIGH', 'CRITICAL', 'IMMEDIATE','MEDIUM']
+                    )
                     st.metric("High/Critical Priority", high_priority_count)
 
             # AI Insights for Individual Agent
