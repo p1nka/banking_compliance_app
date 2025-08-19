@@ -1129,26 +1129,69 @@ def render_individual_dormant_agent_view(df, selected_agent_key, report_date_str
                 results_df = pd.DataFrame(display_data)
                 st.dataframe(results_df, height=300, use_container_width=True)
 
-                # Summary metrics
+                # REPLACE the summary metrics section (around line 800+) with this:
+
+                # Summary metrics - FIXED VERSION
                 col1, col2, col3 = st.columns(3)
+
                 with col1:
                     st.metric("Total Balance Affected", f"AED {total_balance:,.0f}")
+
                 with col2:
-                    avg_dormancy = sum(r.get('dormancy_days', 0) for r in results) / len(results) if results else 0
-                    if 'dormancy_days' in display_data[0]:  # Check if column exists
-                        st.metric("Avg Dormancy Days", f"{avg_dormancy:.0f}")
-                    else:
-                        st.metric("Avg Dormancy Days", "N/A")
+                    # SAFE dormancy calculation with multiple fallback methods
+                    avg_dormancy = 0
+                    dormancy_count = 0
+
+                    try:
+                        # Method 1: Get dormancy from agent results (most reliable)
+                        valid_dormancy_values = []
+                        for result in results:
+                            dormancy_days = result.get('dormancy_days')
+                            if dormancy_days is not None and isinstance(dormancy_days,
+                                                                        (int, float)) and dormancy_days > 0:
+                                valid_dormancy_values.append(dormancy_days)
+
+                        if valid_dormancy_values:
+                            avg_dormancy = sum(valid_dormancy_values) / len(valid_dormancy_values)
+                            dormancy_count = len(valid_dormancy_values)
+
+                        # Method 2: Fallback to display data if agent results don't have dormancy_days
+                        elif display_data and len(display_data) > 0:
+                            # Check if Dormancy Days column exists in display data
+                            if 'Dormancy Days' in display_data[0]:
+                                df_temp = pd.DataFrame(display_data)
+                                dormancy_series = pd.to_numeric(df_temp['Dormancy Days'], errors='coerce')
+                                valid_dormancy_series = dormancy_series.dropna()
+
+                                if len(valid_dormancy_series) > 0:
+                                    avg_dormancy = valid_dormancy_series.mean()
+                                    dormancy_count = len(valid_dormancy_series)
+
+                        # Display the metric
+                        if avg_dormancy > 0 and dormancy_count > 0:
+                            st.metric(
+                                "Avg Dormancy Days",
+                                f"{avg_dormancy:.0f}",
+                                help=f"Based on {dormancy_count} accounts with dormancy data"
+                            )
+                        else:
+                            st.metric(
+                                "Avg Dormancy Days",
+                                "N/A",
+                                help="No valid dormancy data found in results"
+                            )
+
+                    except Exception as e:
+                        st.metric(
+                            "Avg Dormancy Days",
+                            "Error",
+                            help=f"Calculation error: {str(e)}"
+                        )
+
                 with col3:
                     high_priority_count = sum(
                         1 for r in results if r.get('priority') in ['HIGH', 'CRITICAL', 'IMMEDIATE'])
                     st.metric("High/Critical Priority", high_priority_count)
-
-                # Export individual results
-                download_csv_button(
-                    results_df,
-                    f"{agent_name}_analysis_results.csv"
-                )
 
             # AI Insights for Individual Agent
             st.subheader(f"🤖 AI Insights for {selected_agent_key}")
