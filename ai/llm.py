@@ -4,6 +4,7 @@ import os
 import streamlit as st
 import re
 
+
 # Try to import Langchain/Groq
 try:
     from langchain_groq import ChatGroq
@@ -66,7 +67,7 @@ def load_llm():
 
     if not api_key:
         st.error("❗️ GROQ API Key not found.")
-        st.info("Please set `GROQ_API_KEY` in your `.streamlit/secrets.toml` file or as an environment variable.")
+        st.info("Please set `GROQ_API_KEY` as an environment variable.")
         st.sidebar.error("⚠️ AI Assistant Disabled: API Key missing.")
         return None
 

@@ -30,10 +30,10 @@ APP_PASSWORD = os.getenv("APP_PASSWORD", "pass123")
 
 # --- Database Configuration ---
 # FIX: Consolidated duplicate definitions and standardized on os.getenv()
-DB_SERVER = os.getenv("DB_SERVER", "rahulsalpard.database.windows.net")
-DB_NAME = os.getenv("DB_NAME", "ra1a")
+DB_SERVER = os.getenv("DB_SERVER", "bankserver234.database.windows.net")
+DB_NAME = os.getenv("DB_NAME", "BankData")
 DB_PORT = os.getenv("DB_PORT", "1433")
-DB_USERNAME = os.getenv("DB_USER", "rahulsalpard")
+DB_USERNAME = os.getenv("DB_USER", "dataadmin")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "Aug@2025")
 DB_DRIVER = os.getenv("DB_DRIVER", "{ODBC Driver 18 for SQL Server}")
 
@@ -41,7 +41,7 @@ DB_DRIVER = os.getenv("DB_DRIVER", "{ODBC Driver 18 for SQL Server}")
 # --- AI Model Configuration ---
 AI_MODEL_PROVIDER = os.getenv("AI_MODEL_PROVIDER", "groq")
 AI_MODEL_NAME = os.getenv("AI_MODEL_NAME", "llama3-70b-8192")
-AI_API_KEY = os.getenv("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") # No default for API key is a safer practice
+AI_API_KEY = os.getenv("GROQ_API_KEY", "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") # No default for API key is a safer practice
 
 
 # --- Feature Flags & Limits ---

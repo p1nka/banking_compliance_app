@@ -26,12 +26,10 @@ import_errors = []
 from database.connection import (
     get_db_connection,
     maintain_connection,
-    perform_keepalive,
+    wakeup_connection, # <-- Import the real function now
     test_database_connection,
     show_connection_status
     )
-# Create the modern alias for the wakeup function
-wakeup_connection = perform_keepalive
 
 
 # ⚠️ IMPORTANT: Set page config FIRST, before any other imports or operations ⚠️
@@ -115,10 +113,9 @@ def check_password():
                 st.session_state["logout"] = True
                 # Clear application data on logout for security
                 if "db_connection" in st.session_state:
-                    try:
-                        st.session_state["db_connection"].close()
-                    except:
-                        pass
+
+                    st.session_state["db_connection"].close()
+
                     del st.session_state["db_connection"]
 
                 if "SESSION_APP_DF" in st.session_state:

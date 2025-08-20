@@ -22,7 +22,8 @@ from agents.dormant import (
     AccountType,
     CustomerTier,
     Priority,
-    RiskLevel
+    RiskLevel,
+    ProactiveContactAgent
 
 )
 
@@ -39,25 +40,13 @@ except ImportError:
 
 
 from data.exporters import download_pdf_button, download_csv_button
-
-
-try:
-    from ai.llm import (
-        DORMANT_SUMMARY_PROMPT,
-        OBSERVATION_PROMPT,
-        TREND_PROMPT,
-        NARRATION_PROMPT,
-        ACTION_PROMPT
-    )
-except ImportError:
-    # Define placeholder prompts if the file doesn't exist
-    DORMANT_SUMMARY_PROMPT = """Analyze the following banking dormancy report: {analysis_details}\n\nProvide an executive summary, key observations, potential trends, and actionable recommendations focusing on CBUAE compliance and risk mitigation."""
-    OBSERVATION_PROMPT = """Based on the following data, what are the key observations?\nData: {data}"""
-    TREND_PROMPT = """Given these observations, what potential trends can be identified?\nObservation: {observation}"""
-    NARRATION_PROMPT = """Combine these observations and trends into a concise narrative summary.\nObservation: {observation}\nTrend: {trend}"""
-    ACTION_PROMPT = """Based on the observations and trends, what immediate and long-term actions are recommended?\nObservation: {observation}\nTrend: {trend}"""
-    logging.warning("AI LLM prompt templates not found, using default placeholders.")
-
+from ai.llm import (
+    DORMANT_SUMMARY_PROMPT,
+    OBSERVATION_PROMPT,
+    TREND_PROMPT,
+    NARRATION_PROMPT,
+    ACTION_PROMPT
+)
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from database.operations import save_summary_to_db
@@ -86,6 +75,8 @@ def download_csv_button(df, file_name):
     )
 
 
+# FIX THE initialize_dormant_agents FUNCTION in ui/dormant_ui.py
+
 def initialize_dormant_agents(llm_client, config):
     """Initialize all dormant agents with the provided LLM client and config."""
     agents = {}
@@ -93,13 +84,78 @@ def initialize_dormant_agents(llm_client, config):
 
     for agent_name, agent_class in agent_classes.items():
         try:
-            agents[agent_name] = agent_class(llm_client, config)
+            # FIX: Make sure we're passing the right parameters
+            if agent_class is None:
+                logger.error(f"Agent class for {agent_name} is None")
+                agents[agent_name] = None
+                continue
+
+            # Try to instantiate the agent
+            agent_instance = agent_class(llm_client, config)
+
+            # VERIFY the agent was created properly
+            if not hasattr(agent_instance, 'execute'):
+                logger.error(f"Agent {agent_name} missing execute method")
+                agents[agent_name] = None
+            else:
+                agents[agent_name] = agent_instance
+                logger.info(f"Successfully initialized {agent_name}")
+
+        except TypeError as te:
+            logger.error(f"TypeError initializing {agent_name}: {te}")
+            # Try without parameters
+            try:
+                agent_instance = agent_class()
+                agents[agent_name] = agent_instance
+                logger.info(f"Initialized {agent_name} without parameters")
+            except Exception as e2:
+                logger.error(f"Failed to initialize {agent_name} even without params: {e2}")
+                agents[agent_name] = None
         except Exception as e:
             logger.error(f"Failed to initialize {agent_name}: {e}")
             agents[agent_name] = None
 
+    # Log summary
+    successful = [name for name, agent in agents.items() if agent is not None]
+    failed = [name for name, agent in agents.items() if agent is None]
+
+    logger.info(f"Agent initialization complete:")
+    logger.info(f"  Successful: {successful}")
+    if failed:
+        logger.warning(f"  Failed: {failed}")
+
     return agents
 
+
+# ALSO, ADD THIS VERIFICATION FUNCTION
+
+def verify_proactive_agent():
+    """Quick verification that ProactiveContactAgent works"""
+    try:
+        from agents.dormant import ProactiveContactAgent
+        from datetime import datetime, timedelta
+
+        # Test instantiation
+        agent = ProactiveContactAgent()
+        print(f"✅ ProactiveContactAgent instantiated: {type(agent)}")
+
+        # Test execution
+        test_data = {
+            'account_id': 'TEST001',
+            'last_activity_date': datetime.now() - timedelta(days=800),
+            'dormancy_status': 'active'
+        }
+
+        result = agent.execute(test_data, datetime.now())
+        print(f"✅ Agent execution successful: {result.get('status')}")
+
+        return True
+
+    except Exception as e:
+        print(f"❌ ProactiveContactAgent verification failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 # COMPLETE FIX for ui/dormant_ui.py based on your actual CSV data
 # Replace the existing functions with these corrected versions
@@ -204,7 +260,24 @@ def convert_date_safely(date_value):
 
 
 def run_single_agent_analysis(agent, df, report_date: datetime, account_type_filter=None):
-    """Run agent analysis - FINAL FIX with corrected filtering logic."""
+    """
+    Runs a single agent's analysis logic over a DataFrame of accounts.
+
+    This function iterates through accounts, applies agent-specific filtering,
+    executes the agent's logic, and collects meaningful results.
+
+    Args:
+        agent: The agent instance to run.
+        df (pd.DataFrame): The DataFrame containing account data.
+        report_date (datetime): The reference date for the analysis.
+        account_type_filter: (Not currently used, kept for compatibility).
+
+    Returns:
+        A tuple containing:
+        - list: A list of meaningful result dictionaries.
+        - int: The total number of accounts processed.
+        - str: A summary message of the process.
+    """
     results = []
     processed_count = 0
 
@@ -212,100 +285,62 @@ def run_single_agent_analysis(agent, df, report_date: datetime, account_type_fil
         return results, processed_count, "Agent not initialized"
 
     agent_name = agent.__class__.__name__
-
-    st.write(f"🔍 Running {agent_name} on {len(df)} accounts")
-
-    # Debug: Show what's in the data
-    if not df.empty:
-        unique_types = df['account_type'].unique() if 'account_type' in df.columns else ['N/A']
-        unique_subtypes = df['account_subtype'].unique() if 'account_subtype' in df.columns else ['N/A']
-        st.write(f"📊 Account types: {', '.join(unique_types)}")
-        st.write(f"📊 Account subtypes: {', '.join(unique_subtypes)}")
+    st.write(f"🔍 Running {agent_name} on {len(df)} accounts...")
 
     for idx, row in df.iterrows():
         try:
             account_data = prepare_account_data(row)
 
-            # UPDATED FILTERING LOGIC - More inclusive based on your actual data
+            # --- CORE FILTERING LOGIC ---
             should_process = True  # Default to process all
 
             if agent_name == "SafeDepositBoxAgent":
-                # Look for SDB_LINKED subtype (you have this in your data)
                 subtype = account_data.get('account_subtype', '').upper()
                 should_process = (subtype == 'SDB_LINKED')
 
             elif agent_name == "PaymentInstrumentsAgent":
-                # Look for INSTRUMENT_LINKED subtype (you have this in your data)
                 subtype = account_data.get('account_subtype', '').upper()
                 should_process = (subtype == 'INSTRUMENT_LINKED')
 
             elif agent_name == "InvestmentAccountAgent":
-                # Process INVESTMENT account types (you have this in your data)
                 acct_type = account_data.get('account_type', '').upper()
                 should_process = (acct_type == 'INVESTMENT')
 
             elif agent_name == "FixedDepositAgent":
-                # Process FIXED_DEPOSIT account types (you have this in your data)
                 acct_type = account_data.get('account_type', '').upper()
                 should_process = (acct_type == 'FIXED_DEPOSIT')
 
             elif agent_name == "DemandDepositAgent":
-                # Process CURRENT and SAVINGS (most of your accounts)
-                # Exclude special subtypes to avoid double counting
                 acct_type = account_data.get('account_type', '').upper()
                 subtype = account_data.get('account_subtype', '').upper()
                 should_process = (acct_type in ['CURRENT', 'SAVINGS'] and
                                   subtype not in ['SDB_LINKED', 'INSTRUMENT_LINKED'])
 
-            elif agent_name == "CBTransferAgent":
-                # Process ALL dormant accounts for transfer eligibility
-                should_process = True
+            elif agent_name == "ProactiveContactAgent":
+                dormancy_status = account_data.get('dormancy_status', '').upper()
+                should_process = (dormancy_status != 'DORMANT')
 
-            elif agent_name == "Article3ProcessAgent":
-                # Process ALL dormant accounts for contact requirements
-                should_process = True
-
-            elif agent_name == "HighValueAccountAgent":
-                # Process ALL accounts to check for high value + dormant
-                should_process = True
-
-            elif agent_name == "TransitionDetectionAgent":
-                # Process ALL accounts to detect transitions
-                should_process = True
-
-
+            # The following agents process all accounts by default
+            # CBTransferAgent, Article3ProcessAgent, HighValueAccountAgent, TransitionDetectionAgent
+            # No specific filtering logic is needed for them here.
 
             if not should_process:
                 processed_count += 1
                 continue
 
-            # Execute the agent logic
+            # --- AGENT EXECUTION ---
             result = agent.execute(account_data, report_date)
 
-
-
-            # Check for meaningful results
             if result and 'error' not in result:
                 is_meaningful = False
-
-                # Check for meaningful results based on agent type
-                if 'status' in result:
-                    if result['status'] in [
-                        ActivityStatus.DORMANT.value,
-                        ActivityStatus.UNCLAIMED.value,
-                        ActivityStatus.PENDING_REVIEW.value,
-                        'Process Pending',
-                        'High Value Dormant',
-                        'Reactivated'
-                    ]:
-                        is_meaningful = True
-
-                # For CB Transfer Agent
-                if 'eligible' in result and result['eligible']:
+                if 'status' in result and result['status'] in [
+                    ActivityStatus.DORMANT.value, ActivityStatus.UNCLAIMED.value,
+                    ActivityStatus.PENDING_REVIEW.value, 'Process Pending',
+                    'High Value Dormant', 'Reactivated', 'Proactive_Contact_Needed',
+                    'Urgent_Contact_Needed'
+                ]:
                     is_meaningful = True
-
-                # For Article 3 Process Agent
-                if agent_name == 'Article3ProcessAgent' and result.get('status') == 'Process Pending':
+                if 'eligible' in result and result['eligible']:
                     is_meaningful = True
 
                 if is_meaningful:
@@ -315,26 +350,12 @@ def run_single_agent_analysis(agent, df, report_date: datetime, account_type_fil
             processed_count += 1
 
         except Exception as e:
-            st.error(f"Error processing account {row.get('account_id', 'Unknown')} with agent {agent_name}: {e}")
-            import traceback
-            st.write(f"Full error: {traceback.format_exc()}")
+            # Provide a concise error message for the specific account that failed
+            st.error(f"Error processing account {row.get('account_id', 'Unknown')} with {agent_name}: {e}")
 
-    st.write(f"✅ {agent_name}: Processed {processed_count} accounts, found {len(results)} meaningful results")
-
-    # Additional debug for zero results
-    if len(results) == 0 and processed_count > 0:
-        st.warning(f"⚠️ {agent_name} processed {processed_count} accounts but found 0 results. This might indicate:")
-        st.write("1. Accounts don't meet the dormancy criteria for this agent")
-        st.write("2. Date calculations aren't working properly")
-        st.write("3. Agent logic needs adjustment")
-
-        # Show sample account data for debugging
-        if not df.empty:
-            sample_account = prepare_account_data(df.iloc[0])
-            st.write(f"Sample account data: {sample_account}")
+    st.write(f"✅ {agent_name}: Processed {processed_count} accounts, found {len(results)} meaningful results.")
 
     return results, processed_count, f"Processed {processed_count} accounts"
-
 
 def run_all_dormant_identification_checks(df, report_date_str, llm_client, config, dormant_flags_history_df=None):
     """Run comprehensive dormancy analysis using all agents."""
@@ -510,10 +531,40 @@ def run_all_dormant_identification_checks(df, report_date_str, llm_client, confi
         logger.error(f"Transition detection analysis failed: {e}")
         results['dormant_to_active'] = {'count': 0, 'desc': f"Analysis failed: {e}", 'details': {'error': str(e)}}
 
-    results['proactive_contact_needed'] = {'count': 0,
-                                           'desc': "Accounts nearing dormancy requiring proactive contact: 0",
-                                           'details': {'total_processed': 0}}
-    results['summary_kpis']['count_needing_proactive_contact'] = 0
+    try:
+        pc_results, pc_count, pc_desc = run_single_agent_analysis(
+            agents.get('proactive_contact_agent'), df, report_date
+        )
+
+        # Filter for accounts needing contact
+        proactive_needed = [r for r in pc_results if r.get('status') == 'Proactive_Contact_Needed']
+        urgent_needed = [r for r in pc_results if r.get('status') == 'Urgent_Contact_Needed']
+        total_needing_contact = proactive_needed + urgent_needed
+
+        results['proactive_contact_needed'] = {
+            'count': len(total_needing_contact),
+            'desc': f"Accounts approaching dormancy requiring proactive contact: {len(total_needing_contact)}",
+            'details': {
+                'total_processed': pc_count,
+                'urgent_contact': len(urgent_needed),
+                'proactive_contact': len(proactive_needed),
+                'breakdown': f"{len(urgent_needed)} urgent, {len(proactive_needed)} proactive"
+            }
+        }
+        results['summary_kpis']['count_needing_proactive_contact'] = len(total_needing_contact)
+
+        # Store results for detailed view
+        if total_needing_contact:
+            results['proactive_contact_needed']['results'] = total_needing_contact
+
+    except Exception as e:
+        logger.error(f"Proactive contact analysis failed: {e}")
+        results['proactive_contact_needed'] = {
+            'count': 0,
+            'desc': f"Proactive contact analysis failed: {e}",
+            'details': {'error': str(e)}
+        }
+        results['summary_kpis']['count_needing_proactive_contact'] = 0
 
     # Calculate overall KPIs
     try:

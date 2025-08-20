@@ -1,43 +1,84 @@
-# --- START OF FILE pipelines.py ---
+# pipelines.py
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import text
 import json
-from .connection import get_db_connection
+# The import path must be correct for your project structure.
+# If pipelines.py is in the same directory as connection.py, use:
+# from connection import get_db_connection
+# If it's one level up, you might need:
+from database.connection import get_db_connection
 
 
 class BasePipeline:
     def __init__(self):
         self.engine = get_db_connection()
         if self.engine is None:
-            st.error(f"{self.__class__.__name__}: Failed to establish database connection.")
+            st.error(f"❌ {self.__class__.__name__}: Failed to establish database connection.")
 
     def execute_query(self, query, params=None):
-        """Execute a query and return a DataFrame."""
-        if not self.engine: return pd.DataFrame()
+        """
+        Execute a query and return a DataFrame.
+        Handles both connection types as pandas.read_sql is compatible with both.
+        """
+        if not self.engine:
+            return pd.DataFrame()
         try:
+            # pd.read_sql works with both SQLAlchemy engines and DB-API connections
             return pd.read_sql(query, self.engine, params=params)
         except Exception as e:
-            st.error(f"{self.__class__.__name__} Query Error: {e}")
+            st.error(f"❌ {self.__class__.__name__} Query Error: {e}")
             return pd.DataFrame()
 
     def execute_non_query(self, query, params=None):
-        """Execute a non-query statement (INSERT, UPDATE, DELETE)."""
-        if not self.engine: return False
+        """
+        FIXED: Execute a non-query statement (INSERT, UPDATE, DELETE).
+        Handles both SQLAlchemy Engine and raw pymssql connection objects.
+        """
+        if not self.engine:
+            return False
         try:
-            with self.engine.connect() as conn:
-                with conn.begin():
-                    conn.execute(query, params if params is not None else {})
-            return True
+            # Case 1: It's a SQLAlchemy Engine
+            if hasattr(self.engine, 'connect'):
+                with self.engine.connect() as conn:
+                    with conn.begin():  # Manages transactions automatically
+                        conn.execute(query, params if params is not None else {})
+                return True
+            # Case 2: It's a raw pymssql connection
+            else:
+                with self.engine.cursor() as cursor:
+                    # SQLAlchemy text() objects need to be converted to strings for pymssql
+                    query_str = str(query.text if hasattr(query, 'text') else query)
+                    cursor.execute(query_str, params if params is not None else {})
+                self.engine.commit()  # Must commit manually for raw DB-API connections
+                return True
         except Exception as e:
-            st.error(f"{self.__class__.__name__} Non-Query Error: {e}")
+            st.error(f"❌ {self.__class__.__name__} Non-Query Error: {e}")
+            # Attempt to rollback if it was a raw connection that failed
+            if not hasattr(self.engine, 'connect'):
+                try:
+                    self.engine.rollback()
+                except Exception:
+                    pass  # Ignore rollback errors
             return False
 
     def close(self):
-        """Close the database connection."""
-        if self.engine:
-            self.engine.dispose()
+        """
+        FIXED: Close the database connection or dispose of the engine pool.
+        Handles both SQLAlchemy Engine and raw pymssql connection objects.
+        """
+        if not self.engine:
+            return
+        try:
+            # Case 1: SQLAlchemy Engine has .dispose()
+            if hasattr(self.engine, 'dispose'):
+                self.engine.dispose()
+            # Case 2: Raw pymssql connection has .close()
+            elif hasattr(self.engine, 'close'):
+                self.engine.close()
+        except Exception as e:
+            st.warning(f"⚠️ Could not close connection for {self.__class__.__name__}: {e}")
 
 
 class AgentDatabasePipeline(BasePipeline):
@@ -88,10 +129,7 @@ class OutputStoragePipeline(BasePipeline):
         return self.execute_non_query(query, params)
 
     def get_analysis_results(self, analysis_type=None, limit=10):
-        # FIX: Use parameterization for the TOP clause value to prevent SQL injection.
-        # Most DB drivers don't support parameterizing TOP, so we cast to int for safety.
         safe_limit = int(limit)
-
         if analysis_type:
             query = text(f"""
                 SELECT TOP {safe_limit} id, analysis_type, analysis_name, result_summary, record_count, created_by, timestamp
@@ -103,6 +141,12 @@ class OutputStoragePipeline(BasePipeline):
             return self.execute_query(query)
 
 
-# Create singletons for easy access
-agent_db = AgentDatabasePipeline()
-output_db = OutputStoragePipeline()
+# Create singletons for easy access across the app.
+# These will be initialized once when the module is first imported.
+try:
+    agent_db = AgentDatabasePipeline()
+    output_db = OutputStoragePipeline()
+except Exception as e:
+    st.error(f"Fatal error initializing database pipelines: {e}")
+    agent_db = None
+    output_db = None

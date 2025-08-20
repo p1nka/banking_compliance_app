@@ -540,9 +540,86 @@ class TransitionDetectionAgent(DormantAgent):
 
         return result
 
-# =============================================================================
+
+# Add this to your agents/dormant.py file
+
+# ADD THIS CLASS to your agents/dormant.py file
+# Insert it BEFORE the DormantAccountOrchestrator class
+
+class ProactiveContactAgent(DormantAgent):
+    """Agent to identify accounts approaching dormancy that need proactive contact."""
+
+    def execute(self, account_data: Dict, report_date: datetime) -> Dict:
+        agent_name = self._class.name_
+        last_activity_date = account_data.get('last_activity_date')
+
+        # Handle different date formats
+        if isinstance(last_activity_date, str):
+            try:
+                last_activity_date = datetime.fromisoformat(last_activity_date.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                try:
+                    last_activity_date = datetime.strptime(last_activity_date, "%Y-%m-%d")
+                except (ValueError, AttributeError):
+                    return {
+                        'agent': agent_name,
+                        'error': 'Invalid last_activity_date format',
+                        'status': ActivityStatus.PENDING_REVIEW.value,
+                        'regulatory_citation': 'Proactive Contact Policy'
+                    }
+        elif not isinstance(last_activity_date, datetime):
+            return {
+                'agent': agent_name,
+                'error': 'No valid last activity date',
+                'status': ActivityStatus.PENDING_REVIEW.value,
+                'regulatory_citation': 'Proactive Contact Policy'
+            }
+
+        # Calculate days inactive
+        days_inactive = (report_date - last_activity_date).days
+        current_status = str(account_data.get('dormancy_status', 'active')).upper()
+
+        # Base result
+        result = {
+            'agent': agent_name,
+            'status': ActivityStatus.ACTIVE.value,
+            'days_inactive': days_inactive,
+            'regulatory_citation': 'Proactive Contact Policy'
+        }
+
+        # Define thresholds
+        WARNING_THRESHOLD = 730  # 2 years
+        URGENT_THRESHOLD = 913  # 2.5 years
+        DORMANCY_THRESHOLD = 1095  # 3 years
+
+        # Only flag accounts that are NOT already dormant
+        if current_status != 'DORMANT' and days_inactive >= WARNING_THRESHOLD:
+            if days_inactive >= URGENT_THRESHOLD:
+                # Very close to dormancy - urgent contact needed
+                result.update({
+                    'status': 'Urgent_Contact_Needed',
+                    'action': f"URGENT: Contact customer immediately - {DORMANCY_THRESHOLD - days_inactive} days until dormancy",
+                    'priority': Priority.CRITICAL.value,
+                    'risk_level': RiskLevel.HIGH.value,
+                    'days_until_dormancy': DORMANCY_THRESHOLD - days_inactive
+                })
+            else:
+                # Approaching dormancy - proactive contact recommended
+                result.update({
+                    'status': 'Proactive_Contact_Needed',
+                    'action': f"Proactive contact recommended - {DORMANCY_THRESHOLD - days_inactive} days until dormancy",
+                    'priority': Priority.MEDIUM.value,
+                    'risk_level': RiskLevel.MEDIUM.value,
+                    'days_until_dormancy': DORMANCY_THRESHOLD - days_inactive
+                })
+
+        return result
+#========================================================
 # Master Orchestrator for Dormancy Analyzers
 # =============================================================================
+
+# UPDATE the DormantAccountOrchestrator class in agents/dormant.py
+# Replace the existing AGENT_CLASS_MAP with this:
 
 class DormantAccountOrchestrator:
     AGENT_CLASS_MAP = {
@@ -555,6 +632,7 @@ class DormantAccountOrchestrator:
         'article_3_process_agent': Article3ProcessAgent,
         'high_value_account_agent': HighValueAccountAgent,
         'transition_detection_agent': TransitionDetectionAgent,
+        'proactive_contact_agent': ProactiveContactAgent,  # ADD THIS LINE
     }
 
     def __init__(self, llm_client: Any = None, config: Any = None):
