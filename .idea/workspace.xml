@@ -4,14 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="63761940-712c-4363-bb8e-5dc1b9ff83c9" name="Changes" comment="files">
-      <change beforePath="$PROJECT_DIR$/.env" beforeDir="false" afterPath="$PROJECT_DIR$/.env" afterDir="false" />
+    <list default="true" id="63761940-712c-4363-bb8e-5dc1b9ff83c9" name="Changes" comment="Update IDE workspace settings&#10;&#10;# Conflicts:&#10;#&#9;.idea/workspace.xml">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/agents/compliance.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/compliance.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/agents/dormant.py" beforeDir="false" afterPath="$PROJECT_DIR$/agents/dormant.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/data/parser.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ui/compliance_ui.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/compliance_ui.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ui/dormant_ui.py" beforeDir="false" afterPath="$PROJECT_DIR$/ui/dormant_ui.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -38,6 +32,13 @@
     </option>
   </component>
   <component name="Git.Settings">
+    <option name="PUSH_AUTO_UPDATE" value="true" />
+    <option name="PUSH_TAGS">
+      <GitPushTagMode>
+        <option name="argument" value="--tags" />
+        <option name="title" value="All" />
+      </GitPushTagMode>
+    </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
     <option name="UPDATE_TYPE" value="REBASE" />
   </component>
