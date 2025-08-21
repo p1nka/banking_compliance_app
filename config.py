@@ -30,11 +30,11 @@ APP_PASSWORD = os.getenv("APP_PASSWORD", "pass123")
 
 # --- Database Configuration ---
 # FIX: Consolidated duplicate definitions and standardized on os.getenv()
-DB_SERVER = os.getenv("DB_SERVER", "bankserver234.database.windows.net")
-DB_NAME = os.getenv("DB_NAME", "BankData")
+DB_SERVER = os.getenv("DB_SERVER", "agentaugust.database.windows.net")
+DB_NAME = os.getenv("DB_NAME", "agent25")
 DB_PORT = os.getenv("DB_PORT", "1433")
-DB_USERNAME = os.getenv("DB_USER", "dataadmin")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "Aug@2025")
+DB_USERNAME = os.getenv("DB_USER", "agentaugust")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "august@2025")
 DB_DRIVER = os.getenv("DB_DRIVER", "{ODBC Driver 18 for SQL Server}")
 
 
